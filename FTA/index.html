@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Functional Analysis Studio [FAS]</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="styles.css" rel="stylesheet">
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════════════════
+     HEADER
+═══════════════════════════════════════════════════════════ -->
+<header class="header">
+    <div class="logo">
+        <div class="logo-mark">FAS</div>
+        <div>
+            <div class="logo-text">Functional Analysis Studio</div>
+            <div class="logo-sub">FTA · probability propagation · SIL / ASIL</div>
+        </div>
+    </div>
+
+    <span class="machine-pill" id="projectNamePill" style="display:none"></span>
+
+    <div class="header-actions">
+        <button class="btn btn-outline drawer-btn" id="drawerCatalog"
+                title="Show catalog">☰ Catalog</button>
+        <button class="btn btn-outline" onclick="main.newProject()">+ New</button>
+        <button class="btn btn-outline" onclick="main.triggerUpload()">↑ Load</button>
+        <button class="btn btn-primary" onclick="main.downloadProject()">↓ Save</button>
+        <button class="btn btn-outline" onclick="main.exportReport()"
+                title="Export analysis report (Markdown)">⎘ Report</button>
+        <button class="btn btn-outline drawer-btn" id="drawerControls"
+                title="Show analysis panel">Analysis ☰</button>
+        <input type="file" id="fileInput" accept=".json" style="display:none">
+    </div>
+</header>
+
+<!-- ══════════════════════════════════════════════════════════
+     INTRO SCREEN — shown until a project is loaded or created.
+═══════════════════════════════════════════════════════════ -->
+<div class="intro" id="introScreen">
+    <div class="intro-brand">Functional Analysis <span>Studio</span></div>
+    <div class="intro-tag">
+        Fault tree analysis with live probability propagation.
+        Drop basic events, wire them through gates, set leaf probabilities —
+        and watch the failure rate flow from leaves to the top event.
+        SIL (IEC 61508) and ASIL (ISO 26262) derived in one click.
+    </div>
+    <div class="intro-rule">
+        <span><span class="rule-num">01 —</span> Add events from the Catalog (left)</span>
+        <span><span class="rule-num">02 —</span> Set basic-event probabilities (P, λ in FIT, or λ + diagnostic coverage)</span>
+        <span><span class="rule-num">03 —</span> Wire events through AND / OR / Voting / Inhibit gates</span>
+        <span><span class="rule-num">04 —</span> Group events to mark independence boundaries (FFI)</span>
+        <span><span class="rule-num">05 —</span> Press <strong>Recalculate</strong> to propagate up to the top event</span>
+    </div>
+    <div class="intro-btns">
+        <button class="btn btn-sec"     onclick="main.triggerUpload()">↑ Load Project</button>
+        <button class="btn btn-primary" onclick="main.newProject()">+ New Project</button>
+    </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════
+     STUDIO — three panes. Hidden until a project is active.
+═══════════════════════════════════════════════════════════ -->
+<div class="studio" id="studio" style="display:none">
+
+    <!-- LEFT: Catalog -->
+    <aside class="panel-left">
+        <div class="panel-label">Catalog</div>
+        <div class="catalog-scroll" id="catalogList"></div>
+    </aside>
+
+    <!-- MIDDLE: Canvas -->
+    <section class="panel-mid">
+        <div class="canvas-toolbar">
+            <div class="viewmode-toggle" role="tablist" aria-label="View mode">
+                <button class="viewmode-btn on" data-mode="technical"
+                        title="Technical view: scientific notation, SIL/ASIL codes">
+                    Technical
+                </button>
+                <button class="viewmode-btn" data-mode="simplified"
+                        title="Simplified view: percentages, plain-language integrity">
+                    Simplified
+                </button>
+            </div>
+            <span class="canvas-toolbar-spacer"></span>
+            <span style="font-size:0.65rem;color:var(--text-dim)">
+                Click an event, gate or group to edit · Drag to rearrange
+            </span>
+        </div>
+        <div id="cyCanvas"></div>
+    </section>
+
+    <!-- RIGHT: Analysis & Report -->
+    <aside class="panel-right">
+        <div class="panel-label">Analysis &amp; Report</div>
+        <div class="controls-scroll" id="controlsPane"></div>
+    </aside>
+
+</div>
+
+<!-- ══════════════════════════════════════════════════════════
+     SCRIPTS — strict load order:
+       1.  lib/cytoscape.min.js     — diagram engine
+       2.  lib/dagre.min.js          — auto-layout math
+       3.  lib/cytoscape-dagre.js    — adapter
+       4.  config.js                 — global CONFIG
+       5.  fmt.js                    — utilities
+       6.  modal.js                  — shared modal primitive
+       7.  fas.js                    — Project model + JSON I/O
+       8.  analyzer.js               — probability propagation
+       9.  canvas.js                 — Cytoscape integration
+       10. catalog.js                — left-pane buttons
+       11. controls.js               — right-pane analysis & report
+       12. dialogs.js                — every modal
+       13. main.js                   — orchestrator
+═══════════════════════════════════════════════════════════ -->
+<script src="lib/cytoscape.min.js"></script>
+<script src="lib/dagre.min.js"></script>
+<script src="lib/cytoscape-dagre.js"></script>
+<script src="config.js"></script>
+<script src="fmt.js"></script>
+<script src="modal.js"></script>
+<script src="fas.js"></script>
+<script src="analyzer.js"></script>
+<script src="canvas.js"></script>
+<script src="catalog.js"></script>
+<script src="controls.js"></script>
+<script src="dialogs.js"></script>
+<script src="main.js"></script>
+
+</body>
+</html>
