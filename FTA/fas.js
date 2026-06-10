@@ -7,7 +7,7 @@
  * propagation (runtime values are owned by analyzer.js). This
  * separation keeps each module focused.
  *
- * JSON file format (v1):
+ * JSON file format (v2):
  *   {
  *     name, version, missionTime,
  *     groups:    [{ id, name, color, description }],
@@ -22,11 +22,18 @@
  *                }],
  *     gates:     [{ id, type, inputs:[eventId], output:eventId,
  *                   k, inhibitProb, x, y }],
+ *     links:     [{ id, from:eventId, to:eventId }],   // v2+ (optional)
  *     scenarios: [{ id, name, overrides:[{eventId, forcedProbability}] }]
  *   }
  *
  * kind  = 'basic' | 'intermediate' | 'top'         (events)
  * type  = 'AND' | 'OR' | 'VOTING' | 'INHIBIT'      (gates)
+ *
+ * A `link` is a direct event→event pass-through: the `to` event (an
+ * intermediate or top) inherits the probability of the `from` event
+ * verbatim. It is the single-child alternative to a gate. An event may
+ * be fed by exactly one source — one gate OR one link, never both —
+ * so two or more inputs always require a gate (see `feederOf`).
  *
  * Depends on: config.js, fmt.js
  */
@@ -36,16 +43,62 @@ class Project {
     constructor(name = '') {
         this.name        = name;
         this.missionTime = CONFIG.defaultMissionTime;
-        this.groups      = [];
-        this.events      = [];
-        this.gates       = [];
-        this.scenarios   = [];
+        /* Top-level mode. The project carries TWO fully independent
+           sub-models — one for FTA, one for ETA — and the toggle simply
+           chooses which one is live. They never share data; FTA keeps a
+           single top event, ETA permits several final events. Authoring,
+           gates and the propagation engine are identical for both. */
+        this.mode        = 'FTA';
+        this._models = {
+            FTA: Project._emptyModel(),
+            ETA: Project._emptyModel()
+        };
+        // Live arrays mirror the active sub-model (by reference). Every
+        // CRUD method below operates on these, so the rest of the app
+        // never needs to know which mode is active.
+        this._loadActive();
+    }
+
+    static _emptyModel() {
+        return { groups: [], events: [], gates: [], links: [], scenarios: [] };
+    }
+
+    /* Point the live arrays at the active sub-model. */
+    _loadActive() {
+        const m = this._models[this.mode];
+        this.groups    = m.groups;
+        this.events    = m.events;
+        this.gates     = m.gates;
+        this.links     = m.links;
+        this.scenarios = m.scenarios;
+    }
+
+    /* Write the (possibly reassigned) live arrays back into the active
+       sub-model. CRUD methods reassign arrays via .filter(), so the live
+       reference can diverge from the slot — sync before switching/saving. */
+    _syncActive() {
+        const m = this._models[this.mode];
+        m.groups    = this.groups;
+        m.events    = this.events;
+        m.gates     = this.gates;
+        m.links     = this.links;
+        m.scenarios = this.scenarios;
+    }
+
+    setMode(mode) {
+        const m = (mode === 'ETA') ? 'ETA' : 'FTA';
+        if (m === this.mode) return m;
+        this._syncActive();     // stash current live arrays
+        this.mode = m;
+        this._loadActive();     // bring the target sub-model live
+        return m;
     }
 
     /* ── Lookups ──────────────────────────────────────────────────── */
 
     eventById(id)    { return this.events.find(e => e.id === id) || null; }
     gateById(id)     { return this.gates.find(g => g.id === id)  || null; }
+    linkById(id)     { return this.links.find(l => l.id === id)  || null; }
     groupById(id)    { return this.groups.find(gr => gr.id === id) || null; }
     scenarioById(id) { return this.scenarios.find(s => s.id === id) || null; }
 
@@ -58,9 +111,31 @@ class Project {
         return this.gates.find(g => g.output === eventId) || null;
     }
 
+    /* Direct link whose `to` is this event — the single-child pass-through
+       alternative to a gate. ≤ 1 link per `to` event. */
+    linkFeeding(eventId) {
+        return this.links.find(l => l.to === eventId) || null;
+    }
+
+    /* The single source feeding a derived event, whichever kind it is.
+       Returns { kind:'gate', gate } | { kind:'link', link } | null.
+       Used to enforce "one feeder per event" across both constructs. */
+    feederOf(eventId) {
+        const g = this.gateFeeding(eventId);
+        if (g) return { kind: 'gate', gate: g };
+        const l = this.linkFeeding(eventId);
+        if (l) return { kind: 'link', link: l };
+        return null;
+    }
+
     /* All gates this event feeds into (as one of their inputs). */
     gatesFedBy(eventId) {
         return this.gates.filter(g => g.inputs.includes(eventId));
+    }
+
+    /* All direct links this event feeds (as their `from`). */
+    linksFedBy(eventId) {
+        return this.links.filter(l => l.from === eventId);
     }
 
     /* ── Group CRUD ───────────────────────────────────────────────── */
@@ -103,9 +178,10 @@ class Project {
 
     addEvent({ name, kind = 'basic', x = 200, y = 200,
                description = '', groupId = null }) {
-        // Enforce single top event: if 'top' requested and one already
-        // exists, demote the new one to 'intermediate'.
-        if (kind === 'top' && this.topEvent()) kind = 'intermediate';
+        // FTA keeps a single top event: if 'top' is requested and one
+        // already exists, demote the new one to 'intermediate'. ETA mode
+        // permits several final events, so the rule is skipped there.
+        if (this.mode !== 'ETA' && kind === 'top' && this.topEvent()) kind = 'intermediate';
 
         const d = CONFIG.eventDefaults;
         const e = {
@@ -150,7 +226,7 @@ class Project {
     updateEvent(id, patch) {
         const e = this.eventById(id);
         if (!e) return false;
-        if (patch.kind === 'top') {
+        if (patch.kind === 'top' && this.mode !== 'ETA') {
             this.events.forEach(o => {
                 if (o.id !== id && o.kind === 'top') o.kind = 'intermediate';
             });
@@ -168,6 +244,8 @@ class Project {
         this.gates.forEach(g => {
             g.inputs = g.inputs.filter(i => i !== id);
         });
+        // Direct links touching this event (either end) drop too.
+        this.links = this.links.filter(l => l.from !== id && l.to !== id);
         // Scenario overrides referencing this event drop too.
         this.scenarios.forEach(s => {
             s.overrides = s.overrides.filter(o => o.eventId !== id);
@@ -205,6 +283,58 @@ class Project {
 
     deleteGate(id) {
         this.gates = this.gates.filter(g => g.id !== id);
+    }
+
+    /* ── Link CRUD ────────────────────────────────────────────────────
+       A link is a single-child pass-through feeding `to` from `from`.
+       Validation mirrors gate output rules so the two feeder kinds stay
+       mutually exclusive and consistent. */
+
+    /* Why a candidate (from → to) link is or isn't allowed. Returns an
+       error string, or null if the link is valid. Pure — used by both
+       addLink and the dialog so the UI and model never disagree. */
+    linkError(from, to, ignoreLinkId) {
+        const f = this.eventById(from);
+        const t = this.eventById(to);
+        if (!f || !t)        return 'Both ends of the link must be existing events.';
+        if (from === to)     return 'An event cannot link to itself.';
+        if (t.kind === 'basic')
+            return 'The parent (to) must be an intermediate or top event.';
+        if (f.kind === 'top')
+            return 'A top event cannot feed another event — it is the apex.';
+        // One feeder per parent: reject if `to` is already fed by a gate
+        // or by a different link.
+        if (this.gateFeeding(to))
+            return 'Event "' + t.name + '" is already fed by a gate. ' +
+                   'Remove that gate first, or link a different event.';
+        const existingLink = this.linkFeeding(to);
+        if (existingLink && existingLink.id !== ignoreLinkId)
+            return 'Event "' + t.name + '" is already fed by a direct link. ' +
+                   'An event can have only one feeder; use a gate to combine ' +
+                   'two or more inputs.';
+        return null;
+    }
+
+    addLink({ from, to }) {
+        if (this.linkError(from, to)) return null;
+        const l = { id: fmt.uid('lnk'), from, to };
+        this.links.push(l);
+        return l;
+    }
+
+    updateLink(id, patch) {
+        const l = this.linkById(id);
+        if (!l) return false;
+        const from = patch.from != null ? patch.from : l.from;
+        const to   = patch.to   != null ? patch.to   : l.to;
+        if (this.linkError(from, to, id)) return false;
+        l.from = from;
+        l.to   = to;
+        return true;
+    }
+
+    deleteLink(id) {
+        this.links = this.links.filter(l => l.id !== id);
     }
 
     /* ── Scenario CRUD ────────────────────────────────────────────── */
@@ -271,26 +401,32 @@ class Project {
         const ev = this.eventById(eventId);
         if (!ev) return new Set();
         const feeding = this.gateFeeding(eventId);
-        if (!feeding) {
-            // Leaf event — return its group if any.
-            const s = new Set();
-            if (ev.groupId) s.add(ev.groupId);
-            return s;
+        if (feeding) {
+            const all = new Set();
+            feeding.inputs.forEach(i => {
+                this._collectLeafGroups(i, visited).forEach(g => all.add(g));
+            });
+            return all;
         }
-        const all = new Set();
-        feeding.inputs.forEach(i => {
-            this._collectLeafGroups(i, visited).forEach(g => all.add(g));
-        });
-        return all;
+        // A direct link forwards its single child's leaf groups unchanged.
+        const link = this.linkFeeding(eventId);
+        if (link) {
+            return this._collectLeafGroups(link.from, visited);
+        }
+        // Leaf event — return its group if any.
+        const s = new Set();
+        if (ev.groupId) s.add(ev.groupId);
+        return s;
     }
 
-    /* Events that appear as input to more than one gate. Naive
-       propagation double-counts; the analyzer flags these to the user. */
+    /* Events that appear as input to more than one feeder (gate input or
+       link source). Naive propagation double-counts; the analyzer flags
+       these to the user. */
     repeatedEvents() {
         const count = new Map();
-        this.gates.forEach(g => {
-            g.inputs.forEach(i => count.set(i, (count.get(i) || 0) + 1));
-        });
+        const bump  = id => count.set(id, (count.get(id) || 0) + 1);
+        this.gates.forEach(g => g.inputs.forEach(bump));
+        this.links.forEach(l => bump(l.from));
         const out = [];
         count.forEach((c, id) => { if (c >= 2) out.push(id); });
         return out;
@@ -299,60 +435,46 @@ class Project {
     /* ── Serialisation ────────────────────────────────────────────── */
 
     toJSON() {
+        this._syncActive();   // make sure the live arrays are captured
         return {
             name:        this.name,
             version:     CONFIG.fileVersion,
+            mode:        this.mode === 'ETA' ? 'ETA' : 'FTA',
             missionTime: this.missionTime,
-            groups:      this.groups.map(g => ({ ...g })),
-            events:      this.events.map(e => ({ ...e })),
-            gates:       this.gates.map(g => ({
-                ...g,
-                inputs: g.inputs.slice()
-            })),
-            scenarios:   this.scenarios.map(s => ({
+            fta:         Project._dumpModel(this._models.FTA),
+            eta:         Project._dumpModel(this._models.ETA)
+        };
+    }
+
+    static _dumpModel(m) {
+        return {
+            groups:    m.groups.map(g => ({ ...g })),
+            events:    m.events.map(e => ({ ...e })),
+            gates:     m.gates.map(g => ({ ...g, inputs: g.inputs.slice() })),
+            links:     m.links.map(l => ({ ...l })),
+            scenarios: m.scenarios.map(s => ({
                 ...s,
                 overrides: s.overrides.map(o => ({ ...o }))
             }))
         };
     }
 
-    static fromJSON(obj) {
-        if (!obj || typeof obj !== 'object') {
-            throw new Error('Invalid file: not an object.');
-        }
-        // Required arrays (scenarios optional for back-compat).
-        if (!Array.isArray(obj.events) || !Array.isArray(obj.gates) ||
-            !Array.isArray(obj.groups)) {
-            throw new Error(
-                'Invalid file: expected { events, gates, groups, ... }.'
-            );
-        }
-        const p = new Project(obj.name || '');
-        p.missionTime = fmt.posNum(obj.missionTime, CONFIG.defaultMissionTime) ||
-                        CONFIG.defaultMissionTime;
-
-        p.groups = obj.groups.map(g => ({
+    /* Parse one sub-model's arrays from raw JSON. Tolerant of missing
+       keys so legacy files (flat top-level arrays) parse the same way. */
+    static _parseModel(src) {
+        src = src || {};
+        const groups = (Array.isArray(src.groups) ? src.groups : []).map(g => ({
             id:          g.id,
             name:        g.name || '',
-            color:       g.color ||
-                         CONFIG.groupColors[0],
+            color:       g.color || CONFIG.groupColors[0],
             description: g.description || ''
         }));
 
-        p.events = obj.events.map(e => {
+        const events = (Array.isArray(src.events) ? src.events : []).map(e => {
             const d = CONFIG.eventDefaults;
             const kind = ['basic', 'intermediate', 'top'].includes(e.kind)
                        ? e.kind : 'basic';
-
-            // Forward-compat: if the file was written by an older FAS
-            // build that used targetSIL + targetASIL, fold them into the
-            // single `target` field. Prefer ASIL (typically stricter for
-            // automotive use), then SIL, then null.
-            const target = e.target
-                       || e.targetASIL
-                       || e.targetSIL
-                       || null;
-
+            const target = e.target || e.targetASIL || e.targetSIL || null;
             return {
                 id:                  e.id,
                 name:                e.name || '',
@@ -376,7 +498,7 @@ class Project {
             };
         });
 
-        p.gates = obj.gates.map(g => ({
+        const gates = (Array.isArray(src.gates) ? src.gates : []).map(g => ({
             id:          g.id,
             type:        ['AND','OR','VOTING','INHIBIT'].includes(g.type)
                          ? g.type : 'AND',
@@ -391,7 +513,21 @@ class Project {
             x: +g.x || 0, y: +g.y || 0
         }));
 
-        p.scenarios = (obj.scenarios || []).map(s => ({
+        // Direct links: keep only well-formed links whose endpoints exist
+        // and whose `to` isn't already fed by a gate or another link.
+        const eventIds = new Set(events.map(e => e.id));
+        const gateFed  = new Set(gates.map(g => g.output).filter(Boolean));
+        const linkedTo = new Set();
+        const links = (Array.isArray(src.links) ? src.links : [])
+            .map(l => ({ id: l.id, from: l.from, to: l.to }))
+            .filter(l => l.from && l.to &&
+                         eventIds.has(l.from) && eventIds.has(l.to) &&
+                         l.from !== l.to &&
+                         !gateFed.has(l.to) &&
+                         !linkedTo.has(l.to) &&
+                         linkedTo.add(l.to));
+
+        const scenarios = (Array.isArray(src.scenarios) ? src.scenarios : []).map(s => ({
             id:        s.id,
             name:      s.name || '',
             overrides: Array.isArray(s.overrides)
@@ -402,14 +538,46 @@ class Project {
                        : []
         }));
 
-        // Rehydrate id counters past every existing id so subsequent
-        // creates don't collide.
+        return { groups, events, gates, links, scenarios };
+    }
+
+    static fromJSON(obj) {
+        if (!obj || typeof obj !== 'object') {
+            throw new Error('Invalid file: not an object.');
+        }
+        const v = +obj.version || 1;
+        const p = new Project(obj.name || '');
+        p.missionTime = fmt.posNum(obj.missionTime, CONFIG.defaultMissionTime) ||
+                        CONFIG.defaultMissionTime;
+
+        if (v >= 4 && (obj.fta || obj.eta)) {
+            // Current format: two independent sub-models.
+            p._models.FTA = Project._parseModel(obj.fta);
+            p._models.ETA = Project._parseModel(obj.eta);
+            p.mode = (obj.mode === 'ETA') ? 'ETA' : 'FTA';
+        } else {
+            // Legacy (v1–v3): the flat top-level arrays ARE the fault tree.
+            // The old v3 `eta` block (initiating event + pivots) belonged
+            // to a different ETA concept and is intentionally dropped; the
+            // ETA sub-model starts empty. Always open as FTA.
+            if (!Array.isArray(obj.events) || !Array.isArray(obj.gates) ||
+                !Array.isArray(obj.groups)) {
+                throw new Error('Invalid file: expected { events, gates, groups, ... }.');
+            }
+            p._models.FTA = Project._parseModel(obj);
+            p._models.ETA = Project._emptyModel();
+            p.mode = 'FTA';
+        }
+        p._loadActive();
+
+        // Rehydrate id counters past every existing id (both sub-models)
+        // so subsequent creates don't collide.
         fmt.resetUid();
         const all = []
-            .concat(p.events)
-            .concat(p.gates)
-            .concat(p.groups)
-            .concat(p.scenarios);
+            .concat(p._models.FTA.events, p._models.FTA.gates, p._models.FTA.links,
+                    p._models.FTA.groups, p._models.FTA.scenarios)
+            .concat(p._models.ETA.events, p._models.ETA.gates, p._models.ETA.links,
+                    p._models.ETA.groups, p._models.ETA.scenarios);
         all.forEach(item => {
             const match = String(item.id || '').match(/^([A-Za-z]+)_(\d+)$/);
             if (match) fmt.bumpUid(match[1], parseInt(match[2], 10));

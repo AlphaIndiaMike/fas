@@ -228,9 +228,9 @@ const dialogs = (() => {
             return `
                 <div class="dlg-note">
                     <strong>${e.kind === 'top' ? 'Top' : 'Intermediate'} event</strong> — value
-                    is derived from the gate feeding it. Add a gate whose
-                    <em>output</em> is this event and the analyzer will
-                    compute its probability.
+                    is derived from whatever feeds it. Either add a gate whose
+                    <em>output</em> is this event, or link a single child event
+                    directly to it (a pass-through). ${_help('linking')}
                 </div>`;
         }
         const m = e.probMode || 'direct';
@@ -659,6 +659,13 @@ const dialogs = (() => {
                  p.eventById(out).name + '". An event can be fed by only one gate.');
             return;
         }
+        // Enforce single feeder: also reject if a direct link already
+        // feeds this event (one feeder per event — gate OR link).
+        if (p.linkFeeding(out)) {
+            _err('Event "' + p.eventById(out).name + '" is already fed by a ' +
+                 'direct link. Remove that link first, or pick another output.');
+            return;
+        }
         // Enforce: output is intermediate or top.
         const outEv = p.eventById(out);
         if (!outEv || outEv.kind === 'basic') {
@@ -673,6 +680,88 @@ const dialogs = (() => {
         };
         if (existing) api.applyGateUpdate(existing.id, data);
         else          api.applyGateCreate(data);
+        modal.close();
+    }
+
+    /* ── Link (direct event→event signal) ─────────────────────────────
+       A single-child pass-through. The dialog mirrors the gate editor
+       but with just two pickers — child (from) and parent (to) — and the
+       same one-feeder validation the model enforces in Project.linkError. */
+
+    function openLinkEdit(linkId) {
+        const p = api.getProject();
+        if (!p) return;
+        const existing = linkId ? p.linkById(linkId) : null;
+
+        // Need at least one possible child and one possible parent.
+        const possibleChildren = p.events.filter(e => e.kind !== 'top');
+        const possibleParents  = p.events.filter(e => e.kind !== 'basic');
+        if (!existing && (possibleChildren.length === 0 || possibleParents.length === 0)) {
+            _alert('Not enough events',
+                'A link needs a child event (basic or intermediate) and a ' +
+                'parent event (intermediate or top). Add those events first.');
+            return;
+        }
+
+        const l = existing || { id: null, from: null, to: null };
+
+        const childOpts = (sel) => possibleChildren
+            .map(e => `<option value="${e.id}"${e.id === sel ? ' selected' : ''}>` +
+                       `${fmt.escHtml(e.name)} (${e.kind})</option>`)
+            .join('') || '<option value="">— none —</option>';
+        const parentOpts = (sel) => possibleParents
+            .map(e => `<option value="${e.id}"${e.id === sel ? ' selected' : ''}>` +
+                       `${fmt.escHtml(e.name)} (${e.kind})</option>`)
+            .join('') || '<option value="">— none —</option>';
+
+        modal.open((existing ? 'Edit link' : 'New link') + ' (signal)', `
+            ${_errBox()}
+            <div class="dlg-note">
+                A <strong>link</strong> feeds one child event straight into a
+                parent — the parent inherits the child's probability
+                (pass-through). For two or more inputs, use a gate instead.
+                ${_help('linking')}
+            </div>
+            ${_field('Child event (from)',
+                `<select class="dlg-inp" id="fFrom">${childOpts(l.from)}</select>`,
+                'The event whose probability flows up. Basic or intermediate.')}
+            ${_field('Parent event (to)',
+                `<select class="dlg-inp" id="fTo">${parentOpts(l.to)}</select>`,
+                'The event that inherits it. Intermediate or top, and not ' +
+                'already fed by a gate or another link.')}
+        `, _linkFooter(existing));
+    }
+
+    function _linkFooter(existing) {
+        const buttons = [];
+        if (existing) buttons.push({
+            label: 'Delete', cls: 'btn-danger',
+            onClick: () => confirm('Delete link?',
+                'Remove this direct link. The parent event will have no ' +
+                'feeder until you add a gate or a new link.',
+                () => { api.applyLinkDelete(existing.id); modal.close(); })
+        });
+        buttons.push({ label: 'Cancel', cls: 'btn-sec', onClick: modal.close });
+        buttons.push({
+            label: existing ? 'Save' : 'Create',
+            cls:   'btn-primary',
+            onClick: () => _saveLink(existing)
+        });
+        return buttons;
+    }
+
+    function _saveLink(existing) {
+        const p    = api.getProject();
+        const from = document.getElementById('fFrom').value || null;
+        const to   = document.getElementById('fTo').value   || null;
+        if (!from || !to) { _err('Pick both a child and a parent event.'); return; }
+
+        // Single source of truth: ask the model whether this is valid.
+        const err = p.linkError(from, to, existing ? existing.id : null);
+        if (err) { _err(err); return; }
+
+        if (existing) api.applyLinkUpdate(existing.id, { from, to });
+        else          api.applyLinkCreate({ from, to });
         modal.close();
     }
 
@@ -1065,38 +1154,78 @@ const dialogs = (() => {
        EXPORT — small report dialog
        ════════════════════════════════════════════════════════════════ */
 
+    /* Markdown lines for an ETA analysis: one block per final event, with
+       the same PFD/PFH/SIL figures and the plain-language "1 in N hours"
+       gloss the on-screen cards use, plus the shared event breakdown. */
+    function _etaReportLines(lines, a) {
+        lines.push('Mode: ETA (multiple final events) · Mission time: ' + a.missionTime + ' h');
+        lines.push('');
+        if (a.warnings && a.warnings.length) {
+            lines.push('## Warnings');
+            a.warnings.forEach(w => lines.push('- [' + w.kind + '] ' + w.msg));
+            lines.push('');
+        }
+        lines.push('## Final events (' + a.finals.length + ')');
+        if (a.finals.length === 0) {
+            lines.push('- None. Mark one or more events as "final" (top).');
+        }
+        a.finals.forEach((f, i) => {
+            lines.push((i + 1) + '. ' + f.name);
+            lines.push('   - PFD : ' + fmt.probStr(f.pfd) +
+                       (f.pfd != null ? '  (' + fmt.inHoursStr(f.pfd, a.missionTime) + ')' : ''));
+            lines.push('   - PFH : ' + fmt.perHourStr(f.pfh) +
+                       '   SIL ' + f.sil + ' · ASIL ' + f.asil);
+            if (f.target) {
+                lines.push('   - Target: ' + f.target + ' → ' +
+                           (f.targetMet ? 'MET ✓' : 'MISSED ✗'));
+            }
+        });
+        lines.push('');
+        lines.push('## Events');
+        a.events.forEach(ev => {
+            lines.push('- (' + ev.kind + ') ' + ev.name + ' — P=' + fmt.probStr(ev.pfd));
+        });
+    }
+
     function openExport(project, analysis) {
         const lines = [];
         lines.push('# ' + (project.name || 'Untitled project'));
-        lines.push('Generated by Functional Analysis Studio (FAS)');
-        lines.push('Mission time: ' + project.missionTime + ' h');
-        lines.push('');
-        if (analysis && analysis.top) {
-            lines.push('## Top event');
-            lines.push('- Name: ' + analysis.top.name);
-            lines.push('- PFD : ' + fmt.probStr(analysis.top.pfd));
-            lines.push('- PFH : ' + fmt.perHourStr(analysis.top.pfh));
-            lines.push('- SIL : ' + analysis.top.sil + '  (IEC 61508 high-demand)');
-            lines.push('- ASIL: ' + analysis.top.asil + '  (ISO 26262 PMHF, informative)');
-            if (analysis.top.target) {
-                lines.push('- Target: ' + analysis.top.target +
-                    '  →  ' + (analysis.top.targetMet ? 'MET ✓' : 'MISSED ✗'));
+        lines.push('Generated by Functional Analysis Studio (FAS) v' +
+                   (CONFIG.appVersion || '?'));
+
+        const isEta = analysis && analysis.mode === 'ETA';
+        if (isEta) {
+            _etaReportLines(lines, analysis);
+        } else {
+            lines.push('Mode: FTA · Mission time: ' + project.missionTime + ' h');
+            lines.push('');
+            if (analysis && analysis.top) {
+                lines.push('## Top event');
+                lines.push('- Name: ' + analysis.top.name);
+                lines.push('- PFD : ' + fmt.probStr(analysis.top.pfd));
+                lines.push('- PFH : ' + fmt.perHourStr(analysis.top.pfh));
+                lines.push('- SIL : ' + analysis.top.sil + '  (IEC 61508 high-demand)');
+                lines.push('- ASIL: ' + analysis.top.asil + '  (ISO 26262 PMHF, informative)');
+                if (analysis.top.target) {
+                    lines.push('- Target: ' + analysis.top.target +
+                        '  →  ' + (analysis.top.targetMet ? 'MET ✓' : 'MISSED ✗'));
+                }
+                lines.push('');
             }
-            lines.push('');
-        }
-        if (analysis && analysis.warnings.length) {
-            lines.push('## Warnings');
-            analysis.warnings.forEach(w => lines.push('- [' + w.kind + '] ' + w.msg));
-            lines.push('');
-        }
-        if (analysis) {
-            lines.push('## Events');
-            analysis.events.forEach(ev => {
-                lines.push('- (' + ev.kind + ') ' + ev.name +
-                           ' — P=' + fmt.probStr(ev.pfd) +
-                           (ev.kind === 'top' ? '' : ', contribution ' +
-                                (ev.contribution > 0 ? (ev.contribution*100).toFixed(2) + '%' : '—')));
-            });
+            if (analysis && analysis.warnings.length) {
+                lines.push('## Warnings');
+                analysis.warnings.forEach(w => lines.push('- [' + w.kind + '] ' + w.msg));
+                lines.push('');
+            }
+            if (analysis) {
+                lines.push('## Events');
+                analysis.events.forEach(ev => {
+                    lines.push('- (' + ev.kind + ') ' + ev.name +
+                               ' — P=' + fmt.probStr(ev.pfd) +
+                               (ev.kind === 'top' ? '' : ', contribution ' +
+                                    (ev.contribution > 0 ? (ev.contribution*100).toFixed(2) + '%' : '—')));
+                });
+            }
         }
         const text = lines.join('\n');
         const baseName = (project.name || 'fas-report').replace(/\s+/g, '_');
@@ -1167,7 +1296,7 @@ const dialogs = (() => {
 
     return {
         init,
-        openEventEdit, openGateEdit, openGroupEdit, openScenarioEdit,
+        openEventEdit, openGateEdit, openLinkEdit, openGroupEdit, openScenarioEdit,
         openNewProject, openExport, openHelp,
         confirm
     };

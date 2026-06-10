@@ -86,8 +86,10 @@ const fmt = (() => {
     function probStr(p) {
         if (p == null || isNaN(p)) return '—';
         if (p === 0) return '0';
-        const s = p >= 0.01 ? p.toFixed(3) : p.toExponential(2);
-        return _trimZeros(s);
+        // Mid-range stays as a plain decimal; small values render as
+        // friendly × 10ⁿ (display only — the stored value is unchanged).
+        return p >= 0.01 ? _trimZeros(p.toFixed(3))
+                         : _expFriendly(p.toExponential(2));
     }
 
     /* Failure rate in FIT (per 10⁹ h). Fixed notation for 1 ≤ λ < 10000,
@@ -98,7 +100,7 @@ const fmt = (() => {
         if (rate >= 1 && rate < 1e4) {
             return _trimZeros(rate.toFixed(1)) + ' FIT';
         }
-        return _trimZeros(rate.toExponential(2)) + ' FIT';
+        return _expFriendly(rate.toExponential(2)) + ' FIT';
     }
 
     /* Per-hour failure rate. */
@@ -136,10 +138,57 @@ const fmt = (() => {
         return pctStr(p) + ' in ' + intDot(hours || 0) + ' h';
     }
 
+    /* Friendly scientific notation with real Unicode superscripts:
+       "1 × 10⁻¹⁰", "2.5 × 10⁻³", "3.4 × 10²". Mantissa to 3 sig figs,
+       trailing zeros stripped; exponent 0 collapses to just the mantissa.
+       Used by ETA (the FTA technical view keeps its existing e-notation).
+       Derives mantissa/exponent from toExponential to dodge log10 float
+       wobble at powers-of-ten boundaries. */
+    const _SUP = { '-': '⁻', '0': '⁰', '1': '¹', '2': '²', '3': '³',
+                   '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹' };
+    function _supExp(n) {
+        return String(n).split('').map(c => _SUP[c] || c).join('');
+    }
+    /* Convert a JS exponential string ("1.23e-5", "1.00e+2") to friendly
+       superscript form ("1.23 × 10⁻⁵", "1 × 10²"). Mantissa trailing
+       zeros stripped; exponent 0 collapses to the bare mantissa. This is
+       the single place exponent rendering lives — shared by sciStr (ETA)
+       and the FTA formatters (probStr/fitStr) so the whole tool reads the
+       same way. Display only; never affects computed values. */
+    function _expFriendly(s) {
+        const ei = s.indexOf('e');
+        if (ei < 0) return _trimZeros(s);
+        const mant = _trimZeros(s.slice(0, ei));
+        const exp  = parseInt(s.slice(ei + 1), 10);
+        if (exp === 0) return mant;
+        return mant + ' × 10' + _supExp(exp);
+    }
+    function sciStr(x) {
+        if (x == null || isNaN(x)) return '—';
+        if (x === 0) return '0';
+        const sign = x < 0 ? '−' : '';
+        return sign + _expFriendly(Math.abs(x).toExponential(2));
+    }
+
+    /* Plain-language "1 in N" frequency/probability gloss:
+       "≈ 1 in 100 hours", "≈ 1 in 1.000 demands", "≈ 2 per year".
+       Generic helper — caller supplies the singular/plural unit words. */
+    function oneInN(value, singular, plural) {
+        if (value == null || isNaN(value) || value <= 0) return '—';
+        if (value >= 1) {
+            const n = value < 10 ? _trimZeros(value.toFixed(2))
+                                 : intDot(Math.round(value));
+            return '≈ ' + n + ' per ' + (singular || 'unit');
+        }
+        const N = Math.round(1 / value);
+        return '≈ 1 in ' + intDot(N) + ' ' + (plural || 'units');
+    }
+
     return {
         escHtml, uid, bumpUid, resetUid,
         clamp, posInt, posNum,
         probStr, fitStr, perHourStr,
-        pctStr, intDot, inHoursStr
+        pctStr, intDot, inHoursStr,
+        sciStr, oneInN
     };
 })();

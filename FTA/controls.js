@@ -40,10 +40,19 @@ const controls = (() => {
     let _activeScenario = null;
     let _dirty         = true;
     let _viewMode      = 'technical';   // 'technical' | 'simplified'
+    let _mode          = 'FTA';         // 'FTA' | 'ETA'
 
     function init(containerId, callbacks) {
         root = document.getElementById(containerId);
         cb   = callbacks || {};
+        _buildFtaSkeleton();
+    }
+
+    /* Build the FTA panel skeleton and bind its controls. Unchanged from
+       the original single-mode panel — kept intact so FTA behaves exactly
+       as before regardless of the new mode switch. */
+    function _buildFtaSkeleton() {
+        _mode = 'FTA';
         root.innerHTML = `
             <div class="ctrl-banner" id="ctrlBanner" style="display:none">
                 <span class="ctrl-banner-dot">●</span>
@@ -101,12 +110,25 @@ const controls = (() => {
         });
     }
 
+    /* Switch the panel between FTA and ETA. Both modes share the same
+       skeleton; only the summary section renders differently (one top
+       card vs one card per final), so the toggle just re-renders. */
+    function setMode(mode) {
+        const m = (mode === 'ETA') ? 'ETA' : 'FTA';
+        if (m === _mode) return;
+        _mode = m;
+        _analysis = null;
+        _dirty = true;
+        const banner = document.getElementById('ctrlBanner');
+        if (banner) banner.style.display = 'none';
+        if (_project) renderProject(_project);
+    }
+
     function setViewMode(mode) {
         _viewMode = (mode === 'simplified') ? 'simplified' : 'technical';
-        if (_analysis) {
-            _renderSummary(_analysis);
-            _renderBreakdown(_analysis);
-        }
+        if (!_analysis) return;
+        _renderSummary(_analysis);
+        _renderBreakdown(_analysis);
     }
 
     /* ── Project change → repaint the static parts ───────────────── */
@@ -130,7 +152,8 @@ const controls = (() => {
     function applyAnalysis(analysis) {
         _analysis = analysis;
         _dirty = false;
-        document.getElementById('ctrlBanner').style.display = 'none';
+        const banner = document.getElementById('ctrlBanner');
+        if (banner) banner.style.display = 'none';
         _renderSummary(analysis);
         _renderWarnings(analysis);
         _renderBreakdown(analysis);
@@ -139,16 +162,18 @@ const controls = (() => {
     function clearAnalysis() {
         _analysis = null;
         _dirty = true;
+        const banner = document.getElementById('ctrlBanner');
+        if (banner) banner.style.display = 'none';
         _renderSummary(null);
         _renderWarnings(null);
         _renderBreakdown(null);
-        document.getElementById('ctrlBanner').style.display = 'none';
     }
 
     function markDirty() {
         if (!_analysis) return;
         _dirty = true;
-        document.getElementById('ctrlBanner').style.display = 'flex';
+        const banner = document.getElementById('ctrlBanner');
+        if (banner) banner.style.display = 'flex';
     }
 
     function setActiveScenario(sid) {
@@ -161,6 +186,27 @@ const controls = (() => {
     function _renderSummary(analysis) {
         const el = document.getElementById('ctrlSummary');
         if (!el) return;
+        const mt = (analysis && analysis.missionTime) ||
+                   (_project && _project.missionTime) || CONFIG.defaultMissionTime;
+
+        // ETA: one card per final event.
+        if (analysis && Array.isArray(analysis.finals)) {
+            if (analysis.finals.length === 0) {
+                el.innerHTML = `
+                    <div class="ctrl-section-hd">Final events</div>
+                    <div class="ctrl-empty">
+                        No final events yet. Add events and mark one or more
+                        as "final", then Recalculate.
+                    </div>`;
+                return;
+            }
+            el.innerHTML =
+                `<div class="ctrl-section-hd">Final events (${analysis.finals.length}) ${dialogsHelpBtn('etaMode')}</div>` +
+                analysis.finals.map(f => _topCardHtml(f, mt, analysis)).join('');
+            return;
+        }
+
+        // FTA: single top event.
         if (!analysis || !analysis.top) {
             el.innerHTML = `
                 <div class="ctrl-section-hd">Top event</div>
@@ -169,15 +215,17 @@ const controls = (() => {
                 </div>`;
             return;
         }
-        const t = analysis.top;
-        const mt = analysis.missionTime || (_project && _project.missionTime) ||
-                   CONFIG.defaultMissionTime;
+        el.innerHTML =
+            `<div class="ctrl-section-hd">Top event ${dialogsHelpBtn('viewMode')}</div>` +
+            _topCardHtml(analysis.top, mt, analysis);
+    }
+
+    /* Build one result card (used for the FTA top and each ETA final).
+       Identical presentation in both modes — the per-final probability
+       with the "in N hours, ≈ x%" gloss you wanted. */
+    function _topCardHtml(t, mt, analysis) {
         const simple = (_viewMode === 'simplified');
 
-        // ── Value rows ─────────────────────────────────────────────
-        // Technical mode: PFD + PFH side by side.
-        // Simplified mode: one prominent "PoF" row — stakeholders don't
-        // relate to per-hour rates, so the PFH line drops out entirely.
         let valuesHtml;
         if (simple) {
             valuesHtml = `
@@ -201,11 +249,6 @@ const controls = (() => {
                 </div>`;
         }
 
-        // ── Computed chip labels ───────────────────────────────────
-        // Technical: just the code ("SIL 1"). Simplified: plain language
-        // followed by a newline and the technical code in parens. The
-        // newline lets CSS (white-space: pre-line) break before the parens
-        // so e.g. "ASIL A" never wraps mid-code.
         let silDisp  = simple ? (CONFIG.simpleLabels.sil[t.sil]   || t.sil)  : t.sil;
         let asilDisp = simple ? (CONFIG.simpleLabels.asil[t.asil] || t.asil) : t.asil;
         if (simple) {
@@ -213,11 +256,6 @@ const controls = (() => {
             asilDisp = asilDisp.replace(' (', '\n(');
         }
 
-        // ── Target row ─────────────────────────────────────────────
-        // Always uses the technical code (e.g. "ASIL A") regardless of
-        // view mode; plain-language read awkwardly when both names
-        // appeared. When no target is set we render an empty-state
-        // prompt so the user can't miss that they should set one.
         let targetHtml;
         if (t.target) {
             const isMet  = t.targetMet === true;
@@ -239,14 +277,13 @@ const controls = (() => {
                 <div class="ctrl-target target-empty">
                     <div class="ctrl-target-hd">Target ${dialogsHelpBtn('target')}</div>
                     <div class="ctrl-target-empty-msg">
-                        No safety target set. Open the top event and pick one
+                        No safety target set. Open the event and pick one
                         to see whether the design meets it.
                     </div>
                 </div>`;
         }
 
-        el.innerHTML = `
-            <div class="ctrl-section-hd">Top event ${dialogsHelpBtn('viewMode')}</div>
+        return `
             <div class="ctrl-top-card">
                 <div class="ctrl-top-name" title="${fmt.escHtml(t.name)}">${fmt.escHtml(t.name)}</div>
                 ${valuesHtml}
@@ -255,10 +292,10 @@ const controls = (() => {
                     <span class="ctrl-chip ctrl-chip-sil ${_silClass(t.sil)}${simple ? ' chip-multi' : ''}"
                           title="IEC 61508-1 Table 3 (high demand)">${fmt.escHtml(silDisp)}</span>
                     <span class="ctrl-chip ctrl-chip-asil ${_asilClass(t.asil)}${simple ? ' chip-multi' : ''}"
-                          title="ISO 26262-5 Annex F PMHF target only. Final ASIL also depends on the SPFM and LFM hardware metrics — FAS does not evaluate those.">${fmt.escHtml(asilDisp)}</span>
+                          title="ISO 26262-5 Annex F PMHF target only.">${fmt.escHtml(asilDisp)}</span>
                 </div>
                 ${targetHtml}
-                <div class="ctrl-top-foot">Mission time ${fmt.intDot(mt)} h${analysis.scenarioId ? ' · scenario active' : ''}</div>
+                <div class="ctrl-top-foot">Mission time ${fmt.intDot(mt)} h${analysis && analysis.scenarioId ? ' · scenario active' : ''}</div>
             </div>`;
     }
 
@@ -440,6 +477,6 @@ const controls = (() => {
     return {
         init,
         renderProject, applyAnalysis, clearAnalysis,
-        markDirty, setActiveScenario, setViewMode
+        markDirty, setActiveScenario, setViewMode, setMode
     };
 })();

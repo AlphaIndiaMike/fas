@@ -22,12 +22,14 @@
  *       λ_eff = failureRateRaw * (1 - DC) * 1e-9; P = 1 - exp(-λ_eff t)
  *
  *   INTERMEDIATE / TOP events:
- *     Look up the gate whose `output` is this event; recurse into the
- *     inputs, then apply gate formula:
- *       AND    P = ∏ Pᵢ
- *       OR     P = 1 - ∏(1 - Pᵢ)
- *       VOTING P = Σ_{|S|≥k} ∏_{i∈S}Pᵢ · ∏_{i∉S}(1 - Pᵢ)
- *       INHIBIT P = P_in · P_cond
+ *     Find the single source feeding this event:
+ *       · a direct link → inherit the child event's { pfd, pfh } verbatim
+ *         (pass-through; used for a single-child parent), or
+ *       · a gate → recurse into the inputs, then apply the gate formula:
+ *           AND    P = ∏ Pᵢ
+ *           OR     P = 1 - ∏(1 - Pᵢ)
+ *           VOTING P = Σ_{|S|≥k} ∏_{i∈S}Pᵢ · ∏_{i∉S}(1 - Pᵢ)
+ *           INHIBIT P = P_in · P_cond
  *     Then back-derive an effective per-hour rate exactly:
  *       PFH = -ln(1 - P) / t_mission
  *     This inverts the basic-event 1 - exp(-λt) so leaves and
@@ -43,7 +45,8 @@
  *   · FFI: AND/VOTING gate inputs trace back to the same group.
  *   · Repeated event: same event id appears as input to ≥ 2 gates
  *     (independence assumption broken; result optimistic).
- *   · Dangling: intermediate/top event with no gate feeding it.
+ *   · Dangling: intermediate/top event with no feeder (no gate and no
+ *     direct link) feeding it.
  *   · Missing inputs: gate has fewer than its required number of inputs.
  *
  * Depends on: config.js, fas.js (Project type)
@@ -54,6 +57,44 @@ const analyzer = (() => {
     /* ── Public entry point ──────────────────────────────────────── */
 
     function analyze(project, scenarioId) {
+        const { ctx, events, t } = _core(project, scenarioId);
+        // FTA: a single top event is the verdict.
+        const top = project.topEvent();
+        const topAnalysis = top ? _summaryFor(top, ctx, events, true) : null;
+        return {
+            mode:        'FTA',
+            missionTime: t,
+            events,
+            top:         topAnalysis,
+            warnings:    ctx.warnings,
+            scenarioId:  scenarioId || null
+        };
+    }
+
+    /* ETA: same propagation engine, but every event of kind 'top' is a
+       final output, each computed independently. No initiating event, no
+       auto-generated paths — the user authors the tree exactly as in FTA;
+       ETA simply allows more than one final. */
+    function analyzeETA(project, scenarioId) {
+        const { ctx, events, t } = _core(project, scenarioId);
+        const finals = project.events
+            .filter(e => e.kind === 'top')
+            .map(ev => _summaryFor(ev, ctx, events, false))
+            .sort((a, b) => (b.pfd || 0) - (a.pfd || 0));
+        return {
+            mode:        'ETA',
+            missionTime: t,
+            events,
+            finals,
+            warnings:    ctx.warnings,
+            scenarioId:  scenarioId || null
+        };
+    }
+
+    /* Shared work for both modes: compute every event, then push the
+       repeated-event and FFI warnings. Returns the ctx (with cache +
+       warnings) and the per-event result list. */
+    function _core(project, scenarioId) {
         const t = project.missionTime || CONFIG.defaultMissionTime;
         const overrides = _scenarioOverrides(project, scenarioId);
 
@@ -108,47 +149,36 @@ const analyzer = (() => {
             });
         });
 
-        // Top event rollup.
-        const top = project.topEvent();
-        let topAnalysis = null;
-        if (top) {
-            const tv = ctx.cache.get(top.id) || { pfd: null, pfh: null };
-            // If the top is dangling (no gate feeding it) the 0 it returned
-            // is meaningless — don't claim SIL 4 / ASIL D when nothing has
-            // actually been computed. Show "—" instead.
-            const danglingTop = ctx.warnings.some(w =>
-                w.kind === 'dangling' && w.eventId === top.id);
-            const showPfd = danglingTop ? null : tv.pfd;
-            const showPfh = danglingTop ? null : tv.pfh;
+        return { ctx, events, t };
+    }
 
-            // Single target evaluation.
-            const target = _evaluateTarget(top, showPfh);
+    /* Build the result-summary object for one final/top event (PFD, PFH,
+       SIL, ASIL, target verdict). Shared by FTA's single top and each ETA
+       final. When `withContribution` is set, also fills the per-event
+       % contribution to this event's PFD (FTA only — with several finals
+       a single contribution column would be ambiguous). */
+    function _summaryFor(top, ctx, events, withContribution) {
+        const tv = ctx.cache.get(top.id) || { pfd: null, pfh: null };
+        // If the event is dangling (nothing feeding it) the 0 it returned
+        // is meaningless — show "—" rather than claiming SIL 4 / ASIL D.
+        const dangling = ctx.warnings.some(w =>
+            w.kind === 'dangling' && w.eventId === top.id);
+        const showPfd = dangling ? null : tv.pfd;
+        const showPfh = dangling ? null : tv.pfh;
 
-            // Advisory when no target is set — recalc still runs, but
-            // without a target the Met/Missed verdict is blank and the
-            // user might miss that they need to set one.
-            if (!top.target) {
-                ctx.warnings.push({
-                    kind:    'no-target',
-                    eventId: top.id,
-                    msg:     'No safety target set on the top event ' +
-                             '"' + top.name + '". Open the event and pick ' +
-                             'a SIL or ASIL target to evaluate Met / Missed.'
-                });
-            }
+        const target = _evaluateTarget(top, showPfh);
 
-            topAnalysis = {
-                eventId:    top.id,
-                name:       top.name,
-                pfd:        showPfd,
-                pfh:        showPfh,
-                sil:        showPfh == null ? '—' : _silFor(showPfh),
-                asil:       showPfh == null ? '—' : _asilFor(showPfh),
-                target:     top.target || null,   // e.g. 'ASIL A', 'SIL 2', 'QM'
-                targetPFH:  target.pfh,           // numeric bound, or null
-                targetMet:  target.met            // true | false | null
-            };
-            // Per-event % contribution to the top PFD.
+        if (!top.target) {
+            ctx.warnings.push({
+                kind:    'no-target',
+                eventId: top.id,
+                msg:     'No safety target set on "' + top.name + '". ' +
+                         'Open the event and pick a SIL or ASIL target to ' +
+                         'evaluate Met / Missed.'
+            });
+        }
+
+        if (withContribution) {
             events.forEach(ev => {
                 if (ev.id === top.id) return;
                 if (showPfd && ev.pfd != null && showPfd > 0) {
@@ -158,11 +188,15 @@ const analyzer = (() => {
         }
 
         return {
-            missionTime: t,
-            events,
-            top:         topAnalysis,
-            warnings:    ctx.warnings,
-            scenarioId:  scenarioId || null
+            eventId:    top.id,
+            name:       top.name,
+            pfd:        showPfd,
+            pfh:        showPfh,
+            sil:        showPfh == null ? '—' : _silFor(showPfh),
+            asil:       showPfh == null ? '—' : _asilFor(showPfh),
+            target:     top.target || null,
+            targetPFH:  target.pfh,
+            targetMet:  target.met
         };
     }
 
@@ -264,11 +298,19 @@ const analyzer = (() => {
     function _derivedProb(ev, ctx, stack) {
         const g = ctx.project.gateFeeding(ev.id);
         if (!g) {
+            // No gate — a direct link is the single-child alternative.
+            // The parent simply inherits its child's probability (a
+            // pass-through), preserving both PFD and the intrinsic PFH.
+            const link = ctx.project.linkFeeding(ev.id);
+            if (link) {
+                const child = _computeEvent(link.from, ctx, stack);
+                return { pfd: child.pfd, pfh: child.pfh };
+            }
             ctx.warnings.push({
                 kind:    'dangling',
                 eventId: ev.id,
-                msg:     'Event "' + ev.name + '" has no gate feeding it — ' +
-                         'value is 0. Add a gate whose output is this event.'
+                msg:     'Event "' + ev.name + '" has no feeder — value is 0. ' +
+                         'Add a gate, or link a single child event directly to it.'
             });
             return { pfd: 0, pfh: 0 };
         }
@@ -403,5 +445,5 @@ const analyzer = (() => {
         return p;
     }
 
-    return { analyze };
+    return { analyze, analyzeETA };
 })();

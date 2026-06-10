@@ -6,7 +6,8 @@
  *   · group  → compound (parent) node, labeled, coloured
  *   · event  → child node inside its group (or top-level if none)
  *   · gate   → standalone node
- *   · edges  → input arrows (event/event → gate), output arrow (gate → event)
+ *   · edges  → input arrows (event/event → gate), output arrow (gate → event),
+ *              and direct links (event → event, single-child pass-through)
  *
  * Public:
  *   canvas.init(containerId, callbacks)
@@ -14,6 +15,7 @@
  *       onEventClick(eventId),
  *       onGateClick(gateId),
  *       onGroupClick(groupId),
+ *       onLinkClick(linkId),               // tap a direct-link arrow
  *       onPositionChange(kind, id, x, y)   // kind: 'event' | 'gate'
  *     }
  *   canvas.render(project)              — full rebuild
@@ -66,6 +68,16 @@ const canvas = (() => {
             if (t === 'event' && api.onEventClick) api.onEventClick(n.id());
             if (t === 'gate'  && api.onGateClick)  api.onGateClick(n.id());
             if (t === 'group' && api.onGroupClick) api.onGroupClick(n.id());
+        });
+
+        cy.on('tap', 'edge', evt => {
+            if (!editable) return;
+            const e = evt.target;
+            // Only direct links are editable from the canvas; gate arrows
+            // are managed through their gate node.
+            if (e.data('type') === 'link' && api.onLinkClick) {
+                api.onLinkClick(e.data('linkId'));
+            }
         });
 
         cy.on('dragfree', 'node', evt => {
@@ -247,6 +259,19 @@ const canvas = (() => {
                 }
             },
             {
+                /* Direct event→event link: a single-child pass-through.
+                   Dashed to read as "inherits / equals" rather than the
+                   solid combining wires of a gate. */
+                selector: 'edge[type="link"]',
+                style: {
+                    'line-color':         '#3d2f0c',
+                    'target-arrow-color': '#3d2f0c',
+                    'width':              2.5,
+                    'line-style':         'dashed',
+                    'line-dash-pattern':  [6, 3]
+                }
+            },
+            {
                 selector: 'node:active',
                 style: { 'overlay-opacity': 0 }
             }
@@ -334,6 +359,21 @@ const canvas = (() => {
                     }
                 });
             }
+        });
+
+        // Direct links (event → event pass-through). Rendered as a single
+        // arrow from child to parent, visually distinct from gate wiring.
+        (project.links || []).forEach(l => {
+            if (!project.eventById(l.from) || !project.eventById(l.to)) return;
+            els.push({
+                group: 'edges',
+                data: {
+                    id:     l.id + '__link',
+                    linkId: l.id,
+                    source: l.from, target: l.to,
+                    type:   'link'
+                }
+            });
         });
 
         return els;

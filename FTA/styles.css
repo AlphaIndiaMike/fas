@@ -131,6 +131,50 @@ body {
     display: block;
 }
 
+.logo-ver {
+    align-self: flex-start;
+    margin-top: 3px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.56rem;
+    letter-spacing: 0.04em;
+    color: #a89867;
+    background: rgba(255,235,160,0.07);
+    border: 1px solid rgba(255,235,160,0.18);
+    border-radius: 3px;
+    padding: 0.08rem 0.36rem;
+}
+.logo-ver:empty { display: none; }
+
+/* FTA / ETA mode toggle — same pill language as the view-mode toggle,
+   sized a touch larger since it switches the whole studio. */
+.mode-toggle {
+    display: inline-flex;
+    margin-left: 0.5rem;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-mid);
+    border-radius: 3px;
+    padding: 1px;
+    overflow: hidden;
+}
+.mode-btn {
+    background: transparent;
+    border: none;
+    padding: 0.34rem 0.9rem;
+    font-family: 'Outfit', sans-serif;
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    color: var(--text-mid);
+    cursor: pointer;
+    border-radius: 2px;
+    transition: all 0.12s;
+}
+.mode-btn:hover { color: var(--accent); }
+.mode-btn.on {
+    background: var(--accent);
+    color: #2a2417;
+}
+
 .machine-pill {
     font-size: 0.72rem;
     color: #d7c98a;
@@ -1266,4 +1310,40 @@ textarea.dlg-inp { font-family: 'Outfit', sans-serif; resize: vertical; }
         content: ''; position: fixed; inset: 54px 0 0 0;
         background: rgba(0,0,0,0.25); z-index: 400;
     }
+}
+
+/* ── ETA outcome rows (Analysis & Report, ETA mode) ──────────────────
+   Mirrors the FTA event-breakdown row but with a likelihood headline on
+   the right and the path label + share underneath. */
+.ctrl-eta-row {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.4rem 0.55rem;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.72rem;
+}
+.ctrl-eta-row:hover { background: var(--bg-hover, rgba(255,235,160,0.05)); }
+.ctrl-eta-rank {
+    flex: 0 0 auto;
+    width: 18px; height: 18px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 3px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-mid);
+    font-size: 0.6rem; font-weight: 700;
+    color: var(--text-mid);
+}
+.ctrl-eta-body { flex: 1 1 auto; min-width: 0; }
+.ctrl-eta-label {
+    font-weight: 600; color: var(--text-hi, #2a2417);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ctrl-eta-sub { font-size: 0.62rem; color: var(--text-mid); margin-top: 1px; }
+.ctrl-eta-val {
+    flex: 0 0 auto;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.68rem; font-weight: 600;
+    color: var(--accent-deep, #5a4b1a);
+    text-align: right;
+    max-width: 46%;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }

@@ -19,6 +19,13 @@
             <div class="logo-text">Functional Analysis Studio</div>
             <div class="logo-sub">FTA · probability propagation · SIL / ASIL</div>
         </div>
+        <span class="logo-ver" id="appVersion" title="Tool version"></span>
+        <div class="mode-toggle" id="modeToggle" role="tablist" aria-label="Analysis mode">
+            <button type="button" class="mode-btn on" data-appmode="FTA"
+                    title="Fault Tree Analysis — combine basic events up to one top event">FTA</button>
+            <button type="button" class="mode-btn" data-appmode="ETA"
+                    title="Event Tree Analysis — trace one initiating event forward to outcomes">ETA</button>
+        </div>
     </div>
 
     <span class="machine-pill" id="projectNamePill" style="display:none"></span>

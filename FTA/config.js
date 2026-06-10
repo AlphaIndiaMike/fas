@@ -9,9 +9,19 @@
 
 const CONFIG = {
 
-    /* App version. Bumped when the JSON file format changes in a
-       backwards-incompatible way. */
-    fileVersion: 1,
+    /* Software version of the tool itself (semver). Shown in the header
+       and stamped into exported reports / saved projects. BUMP THIS ON
+       EVERY ITERATION of development — patch for fixes, minor for new
+       features, major for breaking changes. */
+    appVersion:  '1.3.0',
+    releaseDate: '2026-06-05',
+
+    /* JSON file-format version. v2 added direct links; v3 was an earlier
+       (now removed) ETA experiment; v4 stores two fully independent
+       sub-models — `fta` and `eta` — selected by `mode`. Older files load
+       as FTA: their flat top-level arrays become the FTA sub-model and the
+       ETA sub-model starts empty. */
+    fileVersion: 4,
 
     /* Project-wide default mission time, in hours. Used by `rate` and
        `coverage` events that don't override it. 10 000h ≈ 1.14 years
@@ -226,6 +236,23 @@ const CONFIG = {
                 '<p><strong>Intermediate event</strong> (round box) — A derived failure. Its probability is computed by the gate feeding it. Use intermediate events to give names to meaningful subsystem-level failure modes — <em>"unhandled invalid sensor data"</em>, <em>"loss of redundant power"</em> — so the tree reads as a story, not just gates and leaves.</p>' +
                 '<p><strong>Top event</strong> (dark square) — The undesired system-level outcome the entire tree is built to quantify. Only one per project. The SIL/ASIL verdict, the safety target, and the Met / Missed check all hang off the top event.</p>' +
                 '<p>Practical convention: pick the top event first (the thing you\'re trying to prevent), then work down to the basic events through intermediate stages — that\'s the deductive direction FTA was designed for.</p>'
+        },
+        etaMode: {
+            title: 'ETA mode — multiple final events',
+            body:
+                '<p><strong>ETA mode</strong> works exactly like FTA — you place basic events, combine them through gates into intermediate events, and feed those onward with gates or direct links — with one difference: it can have <strong>more than one final (top) event</strong>.</p>' +
+                '<p>Each final event is computed independently from its own sub-tree, and the Analysis panel shows a result card per final: the probability over the mission time, expressed as a percentage and as "in N hours of operation, ≈ x% chance".</p>' +
+                '<p>Only basic events take inputs (probability, rate, or rate + coverage). Intermediate and final events are <em>computed</em> from what feeds them — never entered by hand.</p>' +
+                '<p>FTA and ETA are kept in fully separate models within the same file. Switching the toggle never moves data between them; FTA stays a single-top fault tree, ETA holds your multi-final tree.</p>'
+        },
+        linking: {
+            title: 'Linking events (signals)',
+            body:
+                '<p>A <strong>link</strong> is a signal that feeds one event\'s probability up to its parent. There are two ways to feed a derived (intermediate or top) event:</p>' +
+                '<p><strong>Direct link</strong> — connect <em>one</em> child event straight to the parent. The parent simply inherits the child\'s probability (a pass-through): <code>P_parent = P_child</code>. Use this when a single sub-failure <em>is</em> the parent failure and there is nothing to combine — e.g. a top event that is just a named view of one intermediate event. This is what lets you compute a top event from a single intermediate without an artificial gate.</p>' +
+                '<p><strong>Gate</strong> — when <em>two or more</em> children feed the parent, you must use a gate (AND / OR / VOTING / INHIBIT). The gate is what tells the analyzer <em>how</em> to combine the several inputs into one probability; a plain link has no combining rule, so it is only valid for a single child.</p>' +
+                '<p><strong>One feeder per event.</strong> An intermediate or top event can be fed by exactly one source — either one direct link or one gate, never both. To go from a direct link to multiple inputs, remove the link and add a gate (or vice-versa).</p>' +
+                '<p><strong>Direction.</strong> Links flow <em>upward</em>: a basic or intermediate event is the <em>from</em> (child); an intermediate or top event is the <em>to</em> (parent). A top event can never be a child, and a basic event can never be a parent.</p>'
         },
         gateAlgebra: {
             title: 'Gates and their algebra',

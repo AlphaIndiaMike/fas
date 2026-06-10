@@ -21,10 +21,11 @@ const main = (() => {
             onEventClick:     id => dialogs.openEventEdit(id),
             onGateClick:      id => dialogs.openGateEdit(id, null),
             onGroupClick:     id => dialogs.openGroupEdit(id),
+            onLinkClick:      id => dialogs.openLinkEdit(id),
             onPositionChange: _onPositionChange
         });
 
-        catalog.render('catalogList', _onCatalogPick);
+        catalog.render('catalogList', _onCatalogPick, 'FTA');
 
         controls.init('controlsPane', {
             onRecalculate:       _runAnalysis,
@@ -46,6 +47,9 @@ const main = (() => {
             applyGateCreate:      d => { _placeNewGate(d);             _modelChanged(); },
             applyGateUpdate:      (id, p) => { project.updateGate(id, p);  _modelChanged(); },
             applyGateDelete:      id => { project.deleteGate(id);    _modelChanged(); },
+            applyLinkCreate:      d => { project.addLink(d);             _modelChanged(); },
+            applyLinkUpdate:      (id, p) => { project.updateLink(id, p); _modelChanged(); },
+            applyLinkDelete:      id => { project.deleteLink(id);    _modelChanged(); },
             applyGroupCreate:     (d, members) => {
                                     const g = project.addGroup(d);
                                     if (members) _setGroupMembers(g.id, members);
@@ -65,7 +69,48 @@ const main = (() => {
 
         _bindEvents();
         _bindViewModeToggle();
+        _bindModeToggle();
+        _showVersion();
         _showIntro();
+    }
+
+    /* ── FTA / ETA mode toggle (header) ──────────────────────────────── */
+
+    function _bindModeToggle() {
+        document.querySelectorAll('.mode-btn').forEach(b => {
+            b.addEventListener('click', () => _setMode(b.getAttribute('data-appmode')));
+        });
+    }
+
+    /* Switch the whole studio between fault-tree and event-tree mode.
+       The two models are independent — switching never migrates data,
+       it just shows the other model and its tooling. */
+    function _setMode(mode) {
+        if (!project) return;
+        const m = project.setMode(mode);
+        _lastAnalysis = null;
+        _syncModeUI(m);
+        canvas.resetVisuals();
+        _refreshCanvas();
+        controls.renderProject(project);
+        setTimeout(() => { canvas.fit(); }, 60);
+    }
+
+    /* Push the current mode into the header pill, the catalog and the
+       controls panel. Used both by the toggle and on project load. */
+    function _syncModeUI(mode) {
+        const m = (mode === 'ETA') ? 'ETA' : 'FTA';
+        document.querySelectorAll('.mode-btn').forEach(b =>
+            b.classList.toggle('on', b.getAttribute('data-appmode') === m));
+        catalog.setMode(m);
+        controls.setMode(m);
+    }
+
+    /* Stamp the tool version into the header. Sourced from CONFIG so the
+       single bump per iteration propagates everywhere it's shown. */
+    function _showVersion() {
+        const el = document.getElementById('appVersion');
+        if (el) el.textContent = 'v' + (CONFIG.appVersion || '?');
     }
 
     function _bindEvents() {
@@ -213,6 +258,9 @@ const main = (() => {
             case 'gate-INHIBIT':
                 dialogs.openGateEdit(null, kind.replace('gate-', ''));
                 break;
+            case 'link':
+                dialogs.openLinkEdit(null);
+                break;
             case 'group':
                 dialogs.openGroupEdit(null);
                 break;
@@ -258,6 +306,14 @@ const main = (() => {
 
     function _runAnalysis(scenarioId) {
         if (!project) return;
+        // ETA mode: forward enumeration, no top event required.
+        if (project.mode === 'ETA') {
+            const result = analyzer.analyzeETA(project, scenarioId || null);
+            canvas.applyAnalysis(result);
+            controls.applyAnalysis(result);
+            _lastAnalysis = result;
+            return;
+        }
         if (!project.topEvent()) {
             dialogs.confirm('No top event',
                 'Mark one event as kind = "top" before running an analysis. Open the event and switch its kind.',
@@ -347,6 +403,9 @@ const main = (() => {
         _showStudio();
         canvas.setEditable(true);
         catalog.setEnabled(true);
+        // Reflect the loaded project's mode across the pill, catalog and
+        // panel before the first render so ETA files open as event trees.
+        _syncModeUI(project.mode);
         controls.setActiveScenario(activeScenario);
         _refreshCanvas();
         controls.renderProject(project);
@@ -365,7 +424,8 @@ const main = (() => {
 
     return {
         init,
-        newProject, downloadProject, triggerUpload, exportReport
+        newProject, downloadProject, triggerUpload, exportReport,
+        getProject: () => project
     };
 })();
 
