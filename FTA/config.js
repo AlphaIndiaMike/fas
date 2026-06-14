@@ -13,7 +13,7 @@ const CONFIG = {
        and stamped into exported reports / saved projects. BUMP THIS ON
        EVERY ITERATION of development — patch for fixes, minor for new
        features, major for breaking changes. */
-    appVersion:  '1.9.2',
+    appVersion:  '1.9.3',
     releaseDate: '2026-06-14',
 
     /* JSON file-format version. v2 added direct links; v3 was an earlier
@@ -313,7 +313,10 @@ const CONFIG = {
                 '<li><strong>λ<sub>Total, Safety</sub> is the sum of dangerous rates only.</strong> A full FMEDA that also captured the safe failures would report a larger total. Because λ<sub>SD</sub> and λ<sub>SU</sub> are forced to 0, they contribute nothing to the total here.</li>' +
                 '<li><strong>SFF is lower than it would otherwise be.</strong> Safe failures normally count toward the "safe" numerator of SFF; omitting them shrinks both the numerator and the denominator in a way that lowers SFF. So the SFF shown is a floor — the real figure, with safe failures credited, is at least this high.</li>' +
                 '</ul>' +
-                '<p>The metrics are computed over the leaf failure modes; derived (top/mid) modes are roll-ups of those leaves and are not summed again. Treat every figure as the <em>achieved</em> metric, to be checked against your HARA / safety-goal target.</p>'
+                '<p>The metrics are computed over the leaf failure modes; derived (top/mid) modes are roll-ups of those leaves and are not summed again. Treat every figure as the <em>achieved</em> metric, to be checked against your HARA / safety-goal target.</p>' +
+                '<hr>' +
+                '<p><strong>How to read the SFF level.</strong> SFF is the fraction of failures that are either safe or detected — so the higher it is, the smaller the slice that can fail dangerously without being noticed. In IEC 61508-2 it is an <em>architectural-constraint</em> input (Route 1<sub>H</sub>): together with the hardware fault tolerance (HFT, i.e. how much redundancy the element has) it caps the maximum SIL the element may claim. The bands are <strong>&lt; 60 %</strong>, <strong>60–90 %</strong>, <strong>90–99 %</strong> and <strong>≥ 99 %</strong>.</p>' +
+                '<p>Concretely, for a single-channel complex (Type B) element with no redundancy (HFT = 0): an SFF of <strong>20 %</strong> sits below the 60 % floor — the element cannot claim a SIL on its own; you would add diagnostics or a redundant channel. An SFF of <strong>70 %</strong> clears the floor (60–90 % band) and the element can support up to <strong>SIL 1</strong> single-channel — and a step higher with one degree of redundancy. So moving 20 % → 70 % is the difference between "not creditable alone" and "good for SIL 1": higher SFF buys SIL headroom or lets you reach the same SIL with less redundancy. SFF is a constraint, not a substitute for meeting the PFH/PMHF target.</p>'
         },
         fmedaNets: {
             title: 'FMEDA — the three nets',

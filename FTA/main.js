@@ -495,14 +495,17 @@ const main = (() => {
 
     function _onFmedaNodeClick(id, type, targetId) {
         if (_netLink && _fmedaNetClick(id, type)) return;
-        // Convergence gate: toggle AND/OR.
+        // Convergence gate: toggle AND/OR. This changes how rates combine, so
+        // it is a MODEL change — invalidate the computed analysis (the residual
+        // roll-up must be recomputed) rather than only repainting. (A position
+        // move is not a model change and deliberately does not clear analysis.)
         if (type === 'fmeda-failgate' && targetId) {
             const cur = project.failGateOf(targetId);
             project.setFailGate(targetId, cur === 'OR' ? 'AND' : 'OR');
-            _unsaved = true;
-            _refreshCanvas();
-            _flash('Convergence set to ' + project.failGateOf(targetId) +
-                   ' for this effect.');
+            const now = project.failGateOf(targetId);
+            _modelChanged();
+            _flash('Convergence set to ' + now +
+                   ' for this effect — press Recalculate to update the metrics.');
             return;
         }
         // Remember context so the next "add function/FM" targets here.
@@ -723,7 +726,8 @@ const main = (() => {
         init,
         newProject, downloadProject, triggerUpload, exportReport,
         getProject: () => project,
-        _test_pickCatalog: (kind) => _onCatalogPick(kind)
+        _test_pickCatalog: (kind) => _onCatalogPick(kind),
+        _test_fmedaNodeClick: (id, type, targetId) => _onFmedaNodeClick(id, type, targetId)
     };
 })();
 
