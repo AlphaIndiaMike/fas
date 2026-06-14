@@ -121,14 +121,8 @@ body {
     letter-spacing: 0.06em;
     color: #fffefb;
     text-transform: uppercase;
-}
-
-.logo-sub {
-    font-size: 0.58rem;
-    letter-spacing: 0.14em;
-    color: #a89867;
-    text-transform: uppercase;
-    display: block;
+    display: flex;
+    align-items: center;
 }
 
 .logo-ver {
@@ -174,6 +168,12 @@ body {
     background: var(--accent);
     color: #2a2417;
 }
+.mode-btn.disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    color: var(--text-mid);
+}
+.mode-btn.disabled:hover { color: var(--text-mid); }
 
 .machine-pill {
     font-size: 0.72rem;
@@ -774,6 +774,7 @@ body {
     background: var(--bg-elevated);
     border-top: 1px solid var(--border);
 }
+.modal-foot .btn-left { margin-right: auto; }
 
 /* ── Dialog form helpers ────────────────────────────────────────── */
 .dlg-field {
@@ -809,6 +810,73 @@ body {
     box-shadow: 0 0 0 2px rgba(154,124,0,0.18);
 }
 textarea.dlg-inp { font-family: 'Outfit', sans-serif; resize: vertical; }
+
+/* ── pickList: searchable single/multi select (replaces search-above-select) */
+.picklist {
+    border: 1px solid var(--border-mid);
+    border-radius: 5px;
+    background: #fff;
+    overflow: hidden;
+}
+.picklist-summary {
+    padding: 0.4rem 0.6rem;
+    font-size: 0.74rem;
+    color: var(--text-mid);
+    background: var(--bg-elevated, #faf9f5);
+    border-bottom: 1px solid var(--border, #e6e3da);
+}
+.picklist-search {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.45rem 0.6rem;
+    border: none;
+    border-bottom: 1px solid var(--border, #e6e3da);
+    font-family: 'Outfit', sans-serif;
+    font-size: 0.78rem;
+    color: var(--text);
+    outline: none;
+}
+.picklist-search:focus { box-shadow: inset 0 -2px 0 var(--border-focus, #9a7c00); }
+.picklist-list { max-height: 190px; overflow-y: auto; }
+.picklist-opt {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.76rem;
+    color: var(--text);
+    cursor: pointer;
+    border-bottom: 1px solid #f1efe8;
+}
+.picklist-opt:last-child { border-bottom: none; }
+.picklist-opt:hover { background: var(--bg-elevated, #faf9f5); }
+.picklist-opt input { flex: 0 0 auto; margin: 0; cursor: pointer; }
+.picklist-id {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: #b07c00;
+    flex: 0 0 auto;
+}
+.picklist-dash { color: var(--text-mid); flex: 0 0 auto; }
+.picklist-nm { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picklist-empty { padding: 0.6rem; font-size: 0.74rem; color: var(--text-mid); font-style: italic; }
+
+/* Inline unit affix (e.g. the "%" on the PFD percentage field). The
+   wrapper is positioned so the affix sits inside the right edge of the
+   input; extra right-padding on the input keeps typed digits clear of
+   the sign. */
+.dlg-affix-wrap { position: relative; display: block; }
+.dlg-affix-wrap .dlg-inp { padding-right: 1.7rem; }
+.dlg-affix {
+    position: absolute;
+    right: 0.6rem;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 0.78rem;
+    color: var(--text-dim, #888);
+    pointer-events: none;
+}
 .dlg-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.55rem; }
 @media (max-width: 480px) { .dlg-row { grid-template-columns: 1fr; } }
 
@@ -824,6 +892,22 @@ textarea.dlg-inp { font-family: 'Outfit', sans-serif; resize: vertical; }
     line-height: 1.55;
 }
 .dlg-note strong { color: var(--text); font-family: 'JetBrains Mono', monospace; }
+
+/* Read-only computed block for a DERIVED failure mode (item E). */
+.dlg-readonly {
+    border: 1px solid var(--border);
+    background: var(--bg-elevated);
+    border-radius: 4px;
+    padding: 0.5rem 0.7rem;
+    margin: 0.4rem 0 0.7rem;
+}
+.dlg-ro-row {
+    display: flex; justify-content: space-between; gap: 1rem;
+    font-size: 0.72rem; color: var(--text-mid);
+    padding: 2px 0;
+}
+.dlg-ro-row strong { color: var(--text); font-family: 'JetBrains Mono', monospace; }
+
 
 .dlg-err {
     background: var(--red-bg);
@@ -1347,3 +1431,110 @@ textarea.dlg-inp { font-family: 'Outfit', sans-serif; resize: vertical; }
     max-width: 46%;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+
+/* ── FMEDA panel (right pane) — net toggle + common-cause findings ──── */
+.fmeda-net-toggle {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 0.3rem;
+}
+.fmeda-net-btn {
+    flex: 1;
+    font-size: 0.66rem;
+    padding: 0.34rem 0.2rem;
+    border: 1px solid var(--border-mid);
+    background: #fff;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--text);
+    transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.fmeda-net-btn:hover { border-color: var(--accent); }
+.fmeda-net-btn.on {
+    background: var(--accent, #9a7c00);
+    border-color: var(--accent, #9a7c00);
+    color: #fff;
+    font-weight: 600;
+}
+.ctrl-commoncause { display: flex; flex-direction: column; gap: 6px; }
+.cc-card {
+    border: 1px solid #E2A0A0;
+    background: #FCEBEB;
+    border-radius: 5px;
+    padding: 6px 8px;
+}
+.cc-src { font-size: 0.72rem; color: #791F1F; }
+.cc-targets { font-size: 0.68rem; color: #501313; margin-top: 2px; }
+.cc-el { color: #99584a; font-style: italic; }
+
+/* ── FMEDA residual roll-up cards (right pane) ─────────────────────── */
+.ctrl-residual { display: flex; flex-direction: column; gap: 6px; }
+.res-card {
+    border: 1px solid var(--border-mid);
+    background: #fbfaf6;
+    border-radius: 5px;
+    padding: 6px 8px;
+}
+.res-fn { font-size: 0.72rem; font-weight: 600; color: #2c2c2a; }
+.res-el { color: #888; font-weight: 400; font-style: italic; }
+.res-nums { font-size: 0.7rem; color: #444441; margin-top: 2px; }
+.res-raw { color: #888; }
+.res-cut { color: #27500A; font-weight: 600; margin-left: 4px; }
+.res-handled { font-size: 0.66rem; color: #639922; margin-top: 2px; }
+
+/* ── FMEDA metrics card (v1.9.1) ───────────────────────────────────── */
+.res-metrics-card { background: #f7f9fb; }
+.res-m-row {
+    display: flex; justify-content: space-between; gap: 8px;
+    font-size: 0.68rem; color: #3a3a37; padding: 1px 0;
+}
+.res-m-row span sub { font-size: 0.8em; }
+.res-m-row strong { color: #1f1f1d; white-space: nowrap; }
+.res-m-sub {
+    font-size: 0.58rem; font-weight: 700; letter-spacing: 0.05em;
+    text-transform: uppercase; color: #8a887e;
+    margin: 5px 0 2px; padding-top: 4px; border-top: 1px dashed var(--border, #ddd);
+}
+.res-m-note { font-size: 0.6rem; color: #999; margin-top: 5px; font-style: italic; }
+.res-metrics-el { margin-top: 4px; }
+
+/* ── FMEDA residual panel v2 (item 9) ──────────────────────────────── */
+.res-pfh { font-size: 0.66rem; color: #888; margin-top: 1px; }
+.res-section {
+    font-size: 0.62rem; font-weight: 700; letter-spacing: 0.06em;
+    text-transform: uppercase; color: #8a887e;
+    margin: 0.7rem 0 0.3rem; padding-bottom: 2px;
+    border-bottom: 1px solid var(--border, #ddd);
+}
+.res-section:first-child { margin-top: 0; }
+.res-id {
+    font-family: 'JetBrains Mono', monospace; font-size: 0.6rem;
+    color: #b07c00; background: #fbf3da; border-radius: 3px;
+    padding: 0 4px; margin-left: 4px; font-weight: 600;
+}
+.res-lvl {
+    font-size: 0.58rem; text-transform: uppercase; letter-spacing: 0.04em;
+    color: #5E7C9B; border: 1px solid #c4d2e0; border-radius: 3px;
+    padding: 0 4px; margin-left: 4px;
+}
+.res-el-card { background: #f6f5f1; }
+.res-qm {
+    font-size: 0.64rem; color: #8a5a12; background: #faf0dc;
+    border-radius: 3px; padding: 2px 6px; margin-top: 4px;
+    border-left: 3px solid #d49a2a;
+}
+.res-sr-card { background: #f7faf3; }
+.res-sr-id {
+    font-family: 'JetBrains Mono', monospace; font-size: 0.62rem;
+    font-weight: 700; color: #0E5A30; background: #d7eedf;
+    border-radius: 3px; padding: 0 5px; margin-right: 4px;
+}
+.res-sr-mit { font-size: 0.66rem; color: #444441; margin-top: 2px; line-height: 1.45; }
+.res-levels { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+.res-handled { font-size: 0.66rem; color: #777; margin-top: 3px; }
+.res-handled-none { color: #BA7517; }
+.cc-fix { font-size: 0.64rem; color: #6b6b66; margin-top: 3px; font-style: italic; }
+.cc-card-ok { border-color: #9CC069; background: #F0F6E6; }
+.cc-card-ok .cc-src { color: #3B6D11; }
+.cc-link { cursor: pointer; text-decoration: underline dotted; }
+.cc-link:hover { color: var(--accent, #9a7c00); }

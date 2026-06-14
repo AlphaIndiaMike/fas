@@ -39,6 +39,7 @@ const canvas = (() => {
     let editable      = true;
     let _dagreLoaded  = false;
     let viewMode      = 'technical';   // 'technical' | 'simplified'
+    let activeNet     = 'arch';        // FMEDA: 'arch' | 'func' | 'fail'
 
     /* ── init ─────────────────────────────────────────────────────── */
 
@@ -68,6 +69,12 @@ const canvas = (() => {
             if (t === 'event' && api.onEventClick) api.onEventClick(n.id());
             if (t === 'gate'  && api.onGateClick)  api.onGateClick(n.id());
             if (t === 'group' && api.onGroupClick) api.onGroupClick(n.id());
+            // FMEDA nodes route through one callback so main.js can either
+            // complete an in-progress net link or open the right editor.
+            if ((t === 'fmeda-element' || t === 'fmeda-function' ||
+                 t === 'fmeda-fm' || t === 'fmeda-failgate') && api.onFmedaNodeClick) {
+                api.onFmedaNodeClick(n.id(), t, n.data('target'));
+            }
         });
 
         cy.on('tap', 'edge', evt => {
@@ -78,6 +85,14 @@ const canvas = (() => {
             if (e.data('type') === 'link' && api.onLinkClick) {
                 api.onLinkClick(e.data('linkId'));
             }
+            // FMEDA net edges: tap to delete (reuses the FTA confirm-delete
+            // idea). The gate→target edge id ends in "_out" and isn't a real
+            // stored edge, so we ignore it; deleting a source edge removes
+            // the connection and the gate collapses automatically.
+            if (e.data('type') === 'fmeda-net' && api.onNetEdgeClick) {
+                const id = e.id();
+                if (!/_out$/.test(id)) api.onNetEdgeClick(id);
+            }
         });
 
         cy.on('dragfree', 'node', evt => {
@@ -87,6 +102,28 @@ const canvas = (() => {
             const tp = n.data('type');
             if (tp === 'event' || tp === 'gate') {
                 api.onPositionChange(tp, n.id(), p.x, p.y);
+            } else if (tp === 'fmeda-fm') {
+                // FMEDA failure modes persist their position like FTA events.
+                api.onPositionChange('fmeda-fm', n.id(), p.x, p.y);
+            } else if (tp === 'fmeda-failgate') {
+                // Convergence gate: persist keyed by its target failure.
+                api.onPositionChange('fmeda-failgate', n.id(), p.x, p.y);
+            } else if (tp === 'fmeda-element' || tp === 'fmeda-function') {
+                // Dragging a compound moves its descendant failure modes too;
+                // cytoscape only fires dragfree on the dragged parent, so we
+                // persist the parent's own spot AND each descendant FM's new
+                // absolute position — otherwise the children would snap back
+                // on the next render (this was the "elements re-positioned"
+                // bug). Empty compounds simply save their own spot.
+                api.onPositionChange(tp, n.id(), p.x, p.y);
+                const kids = n.descendants
+                    ? n.descendants('node[type="fmeda-fm"]') : null;
+                if (kids && kids.length) {
+                    kids.forEach(c => {
+                        const cp = c.position();
+                        api.onPositionChange('fmeda-fm', c.id(), cp.x, cp.y);
+                    });
+                }
             }
         });
     }
@@ -275,7 +312,8 @@ const canvas = (() => {
                 selector: 'node:active',
                 style: { 'overlay-opacity': 0 }
             }
-        ];
+        ].concat(typeof fmedaCanvas !== 'undefined'
+                 ? fmedaCanvas.swimlaneStyles() : []);
     }
 
     /* ── render: Project → cytoscape elements ────────────────────── */
@@ -284,9 +322,27 @@ const canvas = (() => {
         if (!cy) return;
         lastProject = project;
         cy.elements().remove();
-        cy.add(_projectToElements(project));
+        if (project.mode === 'FMEDA' && typeof fmedaCanvas !== 'undefined') {
+            const cc = project.commonCauseFindings();
+            cy.add(fmedaCanvas.elements(project, activeNet, cc));
+        } else {
+            cy.add(_projectToElements(project));
+        }
         _refreshGrabbable();
     }
+
+    /* FMEDA: switch which net's edges are drawn (right-pane toggle).
+       Now that node positions are persisted (saved x/y on failure modes,
+       seeded otherwise), a full re-render no longer moves anything — so we
+       simply re-render for the chosen net. This also correctly adds/removes
+       the AND/OR gate nodes that belong only to the failure net (the old
+       surgical edge-only swap dropped those gate NODES, which is what made
+       elements/edges disappear). */
+    function setActiveNet(net) {
+        activeNet = ['arch', 'func', 'fail'].includes(net) ? net : 'arch';
+        if (lastProject && lastProject.mode === 'FMEDA') render(lastProject);
+    }
+    function getActiveNet() { return activeNet; }
 
     function _projectToElements(project) {
         const els = [];
@@ -503,6 +559,15 @@ const canvas = (() => {
 
     function autoLayout() {
         if (!cy) return;
+        // FMEDA: a re-render already lays elements out left-to-right by
+        // level with functions/FMs nested inside. dagre on nested compounds
+        // with cross-level net edges fights that, so for FMEDA we simply
+        // re-render (which re-applies the clean horizontal seeding) and fit.
+        if (lastProject && lastProject.mode === 'FMEDA') {
+            render(lastProject);
+            setTimeout(fit, 60);
+            return;
+        }
         try {
             cy.layout({
                 name:    'dagre',
@@ -589,6 +654,11 @@ const canvas = (() => {
         if (!cy) return null;
         const prev = viewMode;
         setViewMode(mode || prev);
+        // FMEDA only: inject a colour legend into the image (not the live
+        // canvas), then remove it after capture. Placed above the content.
+        const isFmeda = lastProject && lastProject.mode === 'FMEDA';
+        let legendIds = [];
+        if (isFmeda) legendIds = _addExportLegend();
         const png = cy.png({
             output:    'blob',
             bg:        '#ffffff',
@@ -597,17 +667,62 @@ const canvas = (() => {
             maxWidth:  4000,
             maxHeight: 4000
         });
+        if (legendIds.length) cy.remove(cy.collection(legendIds.map(id => cy.getElementById(id))));
         // Restore previous label mode.
         setViewMode(prev);
         return png;
+    }
+
+    /* Build temporary legend nodes for the export. Returns their ids so the
+       caller can remove them after the PNG is captured. Positioned above
+       the existing content's bounding box. */
+    function _addExportLegend() {
+        const bb = cy.elements().boundingBox();
+        const x0 = bb.x1;
+        const y  = bb.y1 - 90;   // above everything
+        const items = [
+            { id: '_lg_el',   label: 'Architecture element', cls: 'lg-el' },
+            { id: '_lg_fn',   label: 'Function',              cls: 'lg-fn' },
+            { id: '_lg_un',   label: 'Failure — unhandled',   cls: 'lg-un' },
+            { id: '_lg_ha',   label: 'Failure — handled',     cls: 'lg-ha' },
+            { id: '_lg_de',   label: 'Failure — derived',     cls: 'lg-de' }
+        ];
+        const added = [];
+        items.forEach((it, i) => {
+            cy.add({
+                group: 'nodes',
+                data: { id: it.id, type: 'fmeda-legend', label: it.label, lg: it.cls },
+                position: { x: x0 + 30 + i * 200, y },
+                selectable: false, grabbable: false
+            });
+            added.push(it.id);
+        });
+        return added;
+    }
+
+    /* Pan (without changing zoom) so a node is brought into view — but ONLY
+       if it is currently outside the viewport. Used after creating a new
+       FMEDA node so a freshly-added element never sits off-screen, while
+       leaving the view alone when the node is already visible. */
+    function revealNode(id) {
+        if (!cy) return;
+        const n = cy.getElementById(id);
+        if (!n || n.length === 0) return;
+        const ext = cy.extent();             // visible region, model coords
+        const bb  = n.boundingBox();
+        const m   = 60;                      // keep a little breathing room
+        const outside = bb.x1 < ext.x1 + m || bb.x2 > ext.x2 - m ||
+                        bb.y1 < ext.y1 + m || bb.y2 > ext.y2 - m;
+        if (outside) cy.animate({ center: { eles: n } }, { duration: 280 });
     }
 
     return {
         init, render,
         applyAnalysis, resetVisuals,
         setEditable, autoLayout, fit,
-        viewportCenter, nodePosition,
+        viewportCenter, nodePosition, revealNode,
         setViewMode, getViewMode,
+        setActiveNet, getActiveNet,
         exportPNG
     };
 })();

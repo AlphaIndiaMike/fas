@@ -15,16 +15,15 @@
 <header class="header">
     <div class="logo">
         <div class="logo-mark">FAS</div>
-        <div>
-            <div class="logo-text">Functional Analysis Studio</div>
-            <div class="logo-sub">FTA · probability propagation · SIL / ASIL</div>
-        </div>
+        <div class="logo-text">Functional Analysis Studio</div>
         <span class="logo-ver" id="appVersion" title="Tool version"></span>
         <div class="mode-toggle" id="modeToggle" role="tablist" aria-label="Analysis mode">
             <button type="button" class="mode-btn on" data-appmode="FTA"
                     title="Fault Tree Analysis — combine basic events up to one top event">FTA</button>
             <button type="button" class="mode-btn" data-appmode="ETA"
                     title="Event Tree Analysis — trace one initiating event forward to outcomes">ETA</button>
+            <button type="button" class="mode-btn" data-appmode="FMEDA"
+                    title="FMEDA — architecture / function / failure nets across levels, with common-cause discovery">FMEDA</button>
         </div>
     </div>
 
@@ -132,10 +131,12 @@
 <script src="modal.js"></script>
 <script src="fas.js"></script>
 <script src="analyzer.js"></script>
+<script src="fmeda-canvas.js"></script>
 <script src="canvas.js"></script>
 <script src="catalog.js"></script>
 <script src="controls.js"></script>
 <script src="dialogs.js"></script>
+<script src="demo.js"></script>
 <script src="main.js"></script>
 
 </body>

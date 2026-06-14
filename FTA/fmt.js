@@ -110,6 +110,46 @@ const fmt = (() => {
         return probStr(rate) + ' /h';
     }
 
+    /* Dual-notation per-hour rate for the Simplified view: shows both the
+       scientific form AND the explicit ×10⁻ⁿ /h form so a non-specialist can
+       read it, e.g. "2 × 10⁻⁷ /h". (Single source: _expFriendly already
+       renders Unicode superscripts; we just append the unit.) */
+    function pfhDualStr(pfh) {
+        if (pfh == null || isNaN(pfh)) return '—';
+        if (pfh === 0) return '0 /h';
+        return _expFriendly(pfh.toExponential(2)) + ' /h';
+    }
+
+    /* SIL / ASIL band lookup from a PFH (per-hour) value. Single source of
+       truth, aligned with CONFIG.silBands / asilBands (same bounds the FTA
+       analyzer uses). Returns the band code, e.g. 'SIL 2' / 'ASIL B/C'. */
+    function silForPfh(pfh) {
+        if (pfh == null || isNaN(pfh)) return '—';
+        for (const b of CONFIG.silBands)  { if (pfh < b.max) return b.sil; }
+        return 'No SIL';
+    }
+    function asilForPfh(pfh) {
+        if (pfh == null || isNaN(pfh)) return '—';
+        for (const b of CONFIG.asilBands) { if (pfh < b.max) return b.asil; }
+        return 'QM';
+    }
+
+    /* Stored fraction → percent string for an EDITABLE input field.
+       Unlike pctStr (which rounds for read-only display), this must
+       round-trip cleanly: 0.10 → "10", 0.001 → "0.1", 1 → "100", and
+       it must not introduce float dust like "10.000000000000002". We
+       multiply by 100 and parse-back through Number to drop trailing
+       float noise, capping at a sane number of decimals. Empty / NaN
+       returns "" so a blank field stays blank rather than showing 0. */
+    function pctInputVal(fraction) {
+        if (fraction == null || fraction === '' || isNaN(fraction)) return '';
+        const pct = +fraction * 100;
+        if (pct === 0) return '0';
+        // Up to 9 significant decimals, then strip trailing zeros. 9 is
+        // enough to represent a 1e-9-scale PFD as a percent exactly.
+        return _trimZeros(Number(pct.toFixed(9)).toString());
+    }
+
     /* Simplified-view formatter: percentage with trailing zeros stripped
        so "0.200 %" reads as "0.2%". No space before the % sign. */
     function pctStr(p) {
@@ -188,7 +228,8 @@ const fmt = (() => {
         escHtml, uid, bumpUid, resetUid,
         clamp, posInt, posNum,
         probStr, fitStr, perHourStr,
-        pctStr, intDot, inHoursStr,
-        sciStr, oneInN
+        pctStr, pctInputVal, intDot, inHoursStr,
+        sciStr, oneInN,
+        pfhDualStr, silForPfh, asilForPfh
     };
 })();

@@ -13,15 +13,15 @@ const CONFIG = {
        and stamped into exported reports / saved projects. BUMP THIS ON
        EVERY ITERATION of development — patch for fixes, minor for new
        features, major for breaking changes. */
-    appVersion:  '1.3.0',
-    releaseDate: '2026-06-05',
+    appVersion:  '1.9.2',
+    releaseDate: '2026-06-14',
 
     /* JSON file-format version. v2 added direct links; v3 was an earlier
        (now removed) ETA experiment; v4 stores two fully independent
        sub-models — `fta` and `eta` — selected by `mode`. Older files load
        as FTA: their flat top-level arrays become the FTA sub-model and the
        ETA sub-model starts empty. */
-    fileVersion: 4,
+    fileVersion: 5,
 
     /* Project-wide default mission time, in hours. Used by `rate` and
        `coverage` events that don't override it. 10 000h ≈ 1.14 years
@@ -36,7 +36,22 @@ const CONFIG = {
         probability:        0.001,      // direct value
         failureRate:        100,        // FIT (rate mode)
         failureRateRaw:     1000,       // FIT (coverage mode, before DC)
-        diagnosticCoverage: 0.9         // 0–1 (coverage mode)
+        diagnosticCoverage: 0,          // 0–1 (coverage mode). Default 0: a
+                                        // fresh failure mode carries its FULL
+                                        // raw rate until a DC is entered — no
+                                        // unearned diagnostic credit.
+        diagnosticCoverageLatent: 0     // 0–1 (DC₂). Coverage of the mechanism
+                                        // that reveals a LATENT (multiple-point)
+                                        // fault. Drives the ISO 26262 latent-
+                                        // fault metric (λ_MPF,latent / LFM).
+    },
+
+    /* FMEDA-specific defaults. A failure mode is most naturally entered as a
+       dangerous failure rate plus its diagnostic coverage (IEC 61508 λ_D +
+       DC), so a new FMEDA failure mode opens in coverage mode rather than the
+       FTA default (direct PFD). */
+    fmedaEventDefaults: {
+        probMode: 'coverage'
     },
 
     /* Defaults for newly-created gates. */
@@ -240,10 +255,72 @@ const CONFIG = {
         etaMode: {
             title: 'ETA mode — multiple final events',
             body:
-                '<p><strong>ETA mode</strong> works exactly like FTA — you place basic events, combine them through gates into intermediate events, and feed those onward with gates or direct links — with one difference: it can have <strong>more than one final (top) event</strong>.</p>' +
-                '<p>Each final event is computed independently from its own sub-tree, and the Analysis panel shows a result card per final: the probability over the mission time, expressed as a percentage and as "in N hours of operation, ≈ x% chance".</p>' +
-                '<p>Only basic events take inputs (probability, rate, or rate + coverage). Intermediate and final events are <em>computed</em> from what feeds them — never entered by hand.</p>' +
-                '<p>FTA and ETA are kept in fully separate models within the same file. Switching the toggle never moves data between them; FTA stays a single-top fault tree, ETA holds your multi-final tree.</p>'
+                '<p><strong>ETA mode</strong> works like FTA — you place basic events, combine them through gates into intermediate events, and feed those onward — with one difference: it can have <strong>more than one final (top) event</strong>.</p>' +
+                '<p>Each final is computed independently from its own sub-tree, and the Analysis panel shows a result card per final.</p>' +
+                '<p>FTA and ETA are kept in fully separate models within the same file. Switching the toggle never moves data between them.</p>'
+        },
+        fmedaArch: {
+            title: 'FMEDA — architecture elements & levels',
+            body:
+                '<p><strong>Architecture elements</strong> are the building blocks of the FMEDA. Each sits in one of three swimlanes by level: <strong>top</strong> (the system), <strong>mid</strong> (boards, controllers), and <strong>low</strong> (supporting sub-elements).</p>' +
+                '<p>An element contains <em>functions</em>, and each function contains its <em>failure modes</em> — the box-in-box containment of the FMEDA. Inside a single level, elements are assumed to have freedom from interference; connections run across levels through the architecture net.</p>'
+        },
+        fmedaFunction: {
+            title: 'FMEDA — functions',
+            body:
+                '<p>A <strong>function</strong> is what an element does (e.g. "deliver torque", "provide 12 V"). It lives inside one architecture element and holds the failure modes that can defeat it.</p>' +
+                '<p>Functions connect to other functions through the <em>function net</em> — typically a lower-level function supporting a higher-level one.</p>'
+        },
+        fmedaFailureMode: {
+            title: 'FMEDA — failure modes',
+            body:
+                '<p>A <strong>failure mode</strong> is a leaf failure inside a function. It carries the same inputs as an FTA basic event — failure rate, or rate plus diagnostic coverage, with an evidence note — so the diagnostic-coverage question (e.g. register readback present vs absent) is captured per mode.</p>' +
+                '<p>Each failure mode belongs to <strong>one</strong> function. If the same physical fault affects two functions, do not duplicate it — keep it in its own function and draw a <em>failure-net</em> link to the affected failures in the other functions. That link is exactly what surfaces the common-cause finding.</p>'
+        },
+        fmedaResidual: {
+            title: 'FMEDA — residual rate & hardware metrics',
+            body:
+                '<p><strong>Recalculate</strong> computes each failure mode\'s residual dangerous-undetected rate (FIT), rolls it up per function and element, and derives the hardware metrics below.</p>' +
+                '<p><strong>Residual (per failure mode).</strong> Diagnostic coverage drives the number directly, whether or not a mitigation requirement is written:</p>' +
+                '<p style="text-align:center"><code>λ<sub>DU</sub> = λ<sub>D</sub> × (1 − DC<sub>1</sub>)</code></p>' +
+                '<p><strong>Leaf failures</strong> (low-level, no incoming cause arrows) use their own entered rate. <strong>Derived failures</strong> (top/mid, with incoming failure-net arrows) ignore any typed rate and inherit from their causes; where several causes converge a visible <strong>AND/OR gate</strong> sets how they combine (OR sums the rates; AND takes the joint). Mitigating only at a mid level will not clear the top until the lower path is handled.</p>' +
+                '<hr>' +
+                '<p><strong>The two diagnostic coverages</strong></p>' +
+                '<ul>' +
+                '<li><strong>DC<sub>1</sub></strong> — primary coverage. Fraction of the dangerous rate the safety mechanism detects. Drives the residual and SFF.</li>' +
+                '<li><strong>DC<sub>2</sub></strong> — latent-fault coverage. Of the faults DC<sub>1</sub> catches, the fraction whose <em>latency</em> is itself revealed (a second mechanism, a test, an operator check). Drives the latent-fault figures (λ<sub>MPF,latent</sub> / LFM). Leave 0 if there is no latent-fault check.</li>' +
+                '</ul>' +
+                '<p><strong>IEC 61508 split</strong> (all in FIT)</p>' +
+                '<ul>' +
+                '<li><strong>λ<sub>Total, Safety</sub></strong> — the sum of all failure rates considered. Here it is the sum of the <em>dangerous</em> rates only (see the note on safe failures below).</li>' +
+                '<li><strong>λ<sub>SD</sub> / λ<sub>SU</sub></strong> — safe detected / safe undetected. <strong>Always 0</strong> in this tool today — no safe-failure portion is modelled.</li>' +
+                '<li><strong>λ<sub>DD</sub></strong> — dangerous detected = <code>λ<sub>D</sub> × DC<sub>1</sub></code>.</li>' +
+                '<li><strong>λ<sub>DU</sub></strong> — dangerous undetected = <code>λ<sub>D</sub> × (1 − DC<sub>1</sub>)</code>, i.e. the residual.</li>' +
+                '<li><strong>SFF</strong> — Safe Failure Fraction = <code>(Σλ<sub>S</sub> + Σλ<sub>DD</sub>) / Σλ<sub>Total</sub></code>. With λ<sub>S</sub> = 0 this reduces to <code>Σλ<sub>DD</sub> / Σλ<sub>D</sub></code> — the detected-dangerous fraction.</li>' +
+                '</ul>' +
+                '<p><strong>ISO 26262 terminology mapping</strong></p>' +
+                '<ul>' +
+                '<li><strong>λ<sub>SPF</sub></strong> — single-point fault: a dangerous failure with <em>no</em> safety mechanism (DC<sub>1</sub> = 0). The whole rate escapes.</li>' +
+                '<li><strong>λ<sub>RF</sub></strong> — residual fault: the part of a <em>covered</em> failure the mechanism still misses, <code>λ<sub>D</sub> × (1 − DC<sub>1</sub>)</code> when DC<sub>1</sub> &gt; 0. (λ<sub>SPF</sub> + λ<sub>RF</sub> = λ<sub>DU</sub>.)</li>' +
+                '<li><strong>λ<sub>MPF,dp</sub></strong> — multiple-point fault, detected by DC<sub>1</sub> (<code>λ<sub>D</sub> × DC<sub>1</sub></code>). Only a hazard if a second, independent fault also occurs.</li>' +
+                '<li><strong>λ<sub>MPF,latent</sub></strong> — the portion of λ<sub>MPF,dp</sub> whose latency DC<sub>2</sub> does <em>not</em> reveal: <code>λ<sub>D</sub> × DC<sub>1</sub> × (1 − DC<sub>2</sub>)</code>.</li>' +
+                '<li><strong>SPFM</strong> — Single-Point Fault Metric = <code>1 − Σ(λ<sub>SPF</sub> + λ<sub>RF</sub>) / Σλ</code>.</li>' +
+                '<li><strong>LFM</strong> — Latent-Fault Metric = <code>1 − Σλ<sub>MPF,latent</sub> / Σ(λ − λ<sub>SPF</sub> − λ<sub>RF</sub>)</code>.</li>' +
+                '</ul>' +
+                '<hr>' +
+                '<p><strong>About safe failures (read this).</strong> This tool currently models every entered rate as <em>dangerous</em> — there is no safe-failure portion (λ<sub>S</sub> = 0). Two consequences follow, and both are <strong>conservative</strong>:</p>' +
+                '<ul>' +
+                '<li><strong>λ<sub>Total, Safety</sub> is the sum of dangerous rates only.</strong> A full FMEDA that also captured the safe failures would report a larger total. Because λ<sub>SD</sub> and λ<sub>SU</sub> are forced to 0, they contribute nothing to the total here.</li>' +
+                '<li><strong>SFF is lower than it would otherwise be.</strong> Safe failures normally count toward the "safe" numerator of SFF; omitting them shrinks both the numerator and the denominator in a way that lowers SFF. So the SFF shown is a floor — the real figure, with safe failures credited, is at least this high.</li>' +
+                '</ul>' +
+                '<p>The metrics are computed over the leaf failure modes; derived (top/mid) modes are roll-ups of those leaves and are not summed again. Treat every figure as the <em>achieved</em> metric, to be checked against your HARA / safety-goal target.</p>'
+        },
+        fmedaNets: {
+            title: 'FMEDA — the three nets',
+            body:
+                '<p>Three independent nets connect like-to-like, shown one at a time so the view never becomes a spider web:</p>' +
+                '<p><strong>Architecture net</strong> — element ↔ element. <strong>Function net</strong> — function ↔ function. <strong>Failure net</strong> — failure ↔ failure.</p>' +
+                '<p>The payoff is in the failure net: when one lower-level failure connects to failures in <em>two different functions</em>, that is a <strong>common-cause finding</strong> — a single failure defeating things assumed independent. These are listed in the right pane.</p>'
         },
         linking: {
             title: 'Linking events (signals)',

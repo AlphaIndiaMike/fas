@@ -40,6 +40,7 @@ const controls = (() => {
     let _activeScenario = null;
     let _dirty         = true;
     let _viewMode      = 'technical';   // 'technical' | 'simplified'
+    let _lastFmedaRollup = null;        // remembered FMEDA rollup for re-render
     let _mode          = 'FTA';         // 'FTA' | 'ETA'
 
     function init(containerId, callbacks) {
@@ -59,23 +60,44 @@ const controls = (() => {
                 <span class="ctrl-banner-text">Inputs changed — analysis is stale.</span>
             </div>
 
+            <div class="ctrl-section ctrl-fmeda" id="ctrlFmeda" style="display:none">
+                <div class="ctrl-section-hd">FMEDA — show connections</div>
+                <div class="fmeda-net-toggle" id="fmedaNetToggle">
+                    <button type="button" class="fmeda-net-btn on" data-net="arch">Architecture</button>
+                    <button type="button" class="fmeda-net-btn"    data-net="func">Function net</button>
+                    <button type="button" class="fmeda-net-btn"    data-net="fail">Failure net</button>
+                </div>
+                <div class="ctrl-section-hd" style="margin-top:12px">Common-cause findings</div>
+                <div id="ctrlCommonCause" class="ctrl-commoncause">
+                    <div class="ctrl-empty">Build the failure net — one failure
+                        reaching two functions is flagged here.</div>
+                </div>
+                <div class="ctrl-section-hd" style="margin-top:12px">Residual failure rate
+                    <button type="button" class="dlg-help" data-help="fmedaResidual" title="What is this?">?</button>
+                </div>
+                <div id="ctrlResidual" class="ctrl-residual">
+                    <div class="ctrl-empty">Press Recalculate to compute residual
+                        λ (FIT) per function after diagnostic credit.</div>
+                </div>
+            </div>
+
             <div class="ctrl-section ctrl-summary" id="ctrlSummary"></div>
 
-            <div class="ctrl-section">
+            <div class="ctrl-section" id="ctrlWarningsSec">
                 <div class="ctrl-section-hd">Warnings</div>
                 <div id="ctrlWarnings" class="ctrl-warnings">
                     <div class="ctrl-empty">No analysis yet. Press Recalculate.</div>
                 </div>
             </div>
 
-            <div class="ctrl-section">
+            <div class="ctrl-section" id="ctrlScenariosSec">
                 <div class="ctrl-section-hd">Scenarios</div>
                 <div id="ctrlScenarios" class="ctrl-scenarios">
                     <div class="ctrl-empty">No scenarios. Add one from the Catalog.</div>
                 </div>
             </div>
 
-            <div class="ctrl-section">
+            <div class="ctrl-section" id="ctrlBreakdownSec">
                 <div class="ctrl-section-hd">Event breakdown</div>
                 <div id="ctrlBreakdown" class="ctrl-breakdown">
                     <div class="ctrl-empty">No analysis yet.</div>
@@ -108,24 +130,59 @@ const controls = (() => {
             const v = parseFloat(e.target.value);
             if (!isNaN(v) && v > 0 && cb.onMissionTimeChange) cb.onMissionTimeChange(v);
         });
+        // FMEDA net toggle — one net visible at a time.
+        const netToggle = document.getElementById('fmedaNetToggle');
+        if (netToggle) {
+            netToggle.querySelectorAll('.fmeda-net-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    netToggle.querySelectorAll('.fmeda-net-btn')
+                        .forEach(b => b.classList.toggle('on', b === btn));
+                    if (cb.onNetChange) cb.onNetChange(btn.getAttribute('data-net'));
+                });
+            });
+        }
     }
 
     /* Switch the panel between FTA and ETA. Both modes share the same
        skeleton; only the summary section renders differently (one top
        card vs one card per final), so the toggle just re-renders. */
     function setMode(mode) {
-        const m = (mode === 'ETA') ? 'ETA' : 'FTA';
+        const m = ['ETA','FMEDA'].includes(mode) ? mode : 'FTA';
         if (m === _mode) return;
         _mode = m;
         _analysis = null;
         _dirty = true;
         const banner = document.getElementById('ctrlBanner');
         if (banner) banner.style.display = 'none';
+        _applyModeChrome();
         if (_project) renderProject(_project);
+    }
+
+    /* Show the FMEDA-only panel (net toggle + common cause) in FMEDA mode;
+       hide the analysis-oriented sections that don't apply there. */
+    function _applyModeChrome() {
+        const fmeda = document.getElementById('ctrlFmeda');
+        if (fmeda) fmeda.style.display = (_mode === 'FMEDA') ? 'block' : 'none';
+        // The top-event summary, warnings, scenarios and event breakdown are
+        // FTA/ETA analysis outputs with no meaning in FMEDA (no single top
+        // event, no scenarios, no event contributions). Hide them in FMEDA so
+        // the panel shows only what applies — mirroring how the FMEDA panel is
+        // hidden in FTA/ETA. FTA/ETA are unaffected.
+        const ftaOnly = (_mode !== 'FMEDA');
+        ['ctrlSummary', 'ctrlWarningsSec', 'ctrlScenariosSec', 'ctrlBreakdownSec']
+            .forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.style.display = ftaOnly ? '' : 'none';
+            });
     }
 
     function setViewMode(mode) {
         _viewMode = (mode === 'simplified') ? 'simplified' : 'technical';
+        // FMEDA residual respects the Technical/Simplified toggle too:
+        // Technical = numbers (FIT/PFH), Simplified = ASIL/SIL achieved.
+        if (_mode === 'FMEDA' && _lastFmedaRollup) {
+            applyFmedaRollup(_lastFmedaRollup);
+        }
         if (!_analysis) return;
         _renderSummary(_analysis);
         _renderBreakdown(_analysis);
@@ -138,6 +195,7 @@ const controls = (() => {
         const mt = document.getElementById('ctrlMT');
         if (mt) mt.value = project.missionTime;
         _renderScenarios();
+        if (_mode === 'FMEDA') _renderCommonCause(project);
         if (!_analysis) {
             // Reset summary / warnings / breakdown to "no analysis yet"
             _renderSummary(null);
@@ -147,6 +205,50 @@ const controls = (() => {
             // Re-render existing analysis sections with up-to-date names
             applyAnalysis(_analysis);
         }
+    }
+
+    /* The FMEDA payoff panel: list each failure mode that, via the failure
+       net, reaches two or more functions — i.e. defeats things assumed
+       independent. This is the project-manager argument made visible. */
+    function _renderCommonCause(project) {
+        const el = document.getElementById('ctrlCommonCause');
+        if (!el) return;
+        const findings = project.commonCauseFindings();
+        if (!findings.length) {
+            el.innerHTML = `<div class="ctrl-empty">No common-cause findings.
+                Draw a failure-net link from a CAUSE failure to the failures it
+                propagates to. If one cause reaches failures in two different
+                functions, it shows here.</div>`;
+            return;
+        }
+        let html = '';
+        findings.forEach(f => {
+            const fnNames = [...new Set(f.targets.map(t =>
+                fmt.escHtml(t.functionName) + ' <span class="cc-el">(' +
+                fmt.escHtml(t.elementName) + ')</span>'))].join(', ');
+            // Is the common cause itself mitigated? If so, note it as
+            // addressed (information retained) rather than a raw red flag.
+            const src = project.eventById(f.sourceId);
+            const mitigated = src && project.fmedaIsHandled(src);
+            html += `
+                <div class="cc-card ${mitigated ? 'cc-card-ok' : ''}">
+                    <div class="cc-src">${mitigated ? '✓' : '⚠'}
+                        <strong class="cc-link" data-cc-src="${f.sourceId}">${fmt.escHtml(f.sourceName)}</strong>
+                        is a common cause across ${f.functionCount} functions</div>
+                    <div class="cc-targets">Reaches: ${fnNames}</div>
+                    <div class="cc-fix">${mitigated
+                        ? 'Mitigated at the cause (diagnostic + reaction). Kept here for traceability.'
+                        : 'To address: open the cause and add a diagnostic + reaction mitigation, or eliminate the shared dependency.'}</div>
+                </div>`;
+        });
+        el.innerHTML = html;
+        // Clicking the cause name opens its editor so a mitigation can be
+        // added right away (the "how to fix" path, not a dead flag).
+        el.querySelectorAll('.cc-link').forEach(n => {
+            n.addEventListener('click', () => {
+                if (cb.onEventClick) cb.onEventClick(n.getAttribute('data-cc-src'));
+            });
+        });
     }
 
     function applyAnalysis(analysis) {
@@ -161,12 +263,19 @@ const controls = (() => {
 
     function clearAnalysis() {
         _analysis = null;
+        _lastFmedaRollup = null;
         _dirty = true;
         const banner = document.getElementById('ctrlBanner');
         if (banner) banner.style.display = 'none';
         _renderSummary(null);
         _renderWarnings(null);
         _renderBreakdown(null);
+        // FMEDA residual panel back to its empty prompt (the button did
+        // nothing here before — this is the fix).
+        const res = document.getElementById('ctrlResidual');
+        if (res) res.innerHTML =
+            `<div class="ctrl-empty">Press Recalculate to compute the residual ` +
+            `failure rate per function and element.</div>`;
     }
 
     function markDirty() {
@@ -474,9 +583,181 @@ const controls = (() => {
         });
     }
 
+    /* Reflect the active FMEDA net in the toggle highlight (called when the
+       net is changed programmatically, e.g. starting a net link). */
+    function setActiveNet(net) {
+        const toggle = document.getElementById('fmedaNetToggle');
+        if (!toggle) return;
+        toggle.querySelectorAll('.fmeda-net-btn').forEach(b =>
+            b.classList.toggle('on', b.getAttribute('data-net') === net));
+    }
+
+    /* Render the FMEDA residual roll-up (from Recalculate). Three sections:
+         1. ELEMENTS — each architecture element with its achieved integrity
+            band (SIL/ASIL chips, shaded). The most stringent function sets
+            the element band (item E).
+         2. FUNCTIONS — per-function residual presented integrity-first with
+            a plain QM remark when there is no integrity claim (item 9).
+         3. SAFETY REQUIREMENTS — the numbered SRn list for traceability
+            (item D). */
+    /* Render the FMEDA hardware-metric breakdown: the IEC 61508 λ split and
+       SFF, plus the ISO 26262 SPF/RF/MPF mapping and SPFM/LFM. Computed over
+       leaf failure modes; λ_S = 0 (no safe-failure portion modelled). */
+    function _fmedaMetricsHtml(metrics, simple) {
+        const t   = metrics.total;
+        const fit = v => fmt.fitStr(v);
+        const pct = v => (v == null) ? '—' : (Math.round(v * 1000) / 10) + '%';
+        const row = (k, v) => `<div class="res-m-row"><span>${k}</span><strong>${v}</strong></div>`;
+        let h = `<div class="res-section">FMEDA metrics</div>
+            <div class="res-card res-metrics-card">
+                ${row('λ<sub>Total, Safety</sub>', fit(t.lambdaTotal))}
+                ${row('λ<sub>SD</sub> · λ<sub>SU</sub>', fit(t.lambdaSD) + ' · ' + fit(t.lambdaSU))}
+                ${row('λ<sub>DD</sub> — detected dangerous', fit(t.lambdaDD))}
+                ${row('λ<sub>DU</sub> — undetected dangerous', fit(t.lambdaDU))}
+                ${row('<strong>Safe Failure Fraction (SFF)</strong>', '<strong>' + pct(t.sff) + '</strong>')}
+                <div class="res-m-sub">ISO 26262 terminology</div>
+                ${row('λ<sub>SPF</sub> — single-point fault', fit(t.lambdaSPF))}
+                ${row('λ<sub>RF</sub> — residual fault', fit(t.lambdaRF))}
+                ${row('λ<sub>MPF,dp</sub> — multiple-point, detected', fit(t.lambdaMPFdp))}
+                ${row('λ<sub>MPF,latent</sub> — latent', fit(t.lambdaMPFlatent))}
+                ${row('Single-Point Fault Metric (SPFM)', pct(t.spfm))}
+                ${row('Latent-Fault Metric (LFM)', pct(t.lfm))}
+                <div class="res-m-note">No safe-failure portion modelled (λ<sub>S</sub> = 0), so λ<sub>SD</sub> = λ<sub>SU</sub> = 0; λ<sub>Total</sub> sums dangerous rates only and SFF is a conservative floor (safe failures would raise it). Computed over leaf failure modes — the achieved metric to check against your HARA target.</div>
+            </div>`;
+        if (metrics.elements && metrics.elements.length > 1) {
+            metrics.elements.slice()
+                .sort((a, b) => (b.lambdaTotal || 0) - (a.lambdaTotal || 0))
+                .forEach(e => {
+                    h += `<div class="res-card res-metrics-el">
+                        <div class="res-fn">${fmt.escHtml(e.name)}
+                            <span class="res-id">${fmt.escHtml(e.id || '')}</span>
+                            ${e.level ? `<span class="res-lvl">${fmt.escHtml(e.level)}</span>` : ''}</div>
+                        <div class="res-pfh">λ ${fit(e.lambdaTotal)} FIT · SFF ${pct(e.sff)} · SPFM ${pct(e.spfm)} · LFM ${pct(e.lfm)}</div>
+                    </div>`;
+                });
+        }
+        return h;
+    }
+
+    function applyFmedaRollup(rollup) {
+        _lastFmedaRollup = rollup || null;   // remember for view-mode re-render
+        const el = document.getElementById('ctrlResidual');
+        if (!el) return;
+        if (!rollup || !rollup.functions.length) {
+            el.innerHTML = `<div class="ctrl-empty">No failure modes yet.</div>`;
+            return;
+        }
+        const simple = (_viewMode === 'simplified');
+        const toPfh  = fit => fit * 1e-9;
+        const fitStr = v => fmt.fitStr(v);
+
+        // Band helpers — single source of truth (fmt.* == FTA analyzer).
+        const bandChips = (pfh) => {
+            const sil  = fmt.silForPfh(pfh);
+            const asil = fmt.asilForPfh(pfh);
+            const silLbl  = simple ? (CONFIG.simpleLabels.sil[sil]   || sil)  : sil;
+            const asilLbl = simple ? (CONFIG.simpleLabels.asil[asil] || asil) : asil;
+            return `<span class="ctrl-chip ctrl-chip-sil ${_silClass(sil)}">${fmt.escHtml(silLbl)}</span>
+                    <span class="ctrl-chip ctrl-chip-asil ${_asilClass(asil)}">${fmt.escHtml(asilLbl)}</span>`;
+        };
+        // QM remark when neither standard grants an integrity claim.
+        const qmRemark = (pfh) => {
+            const noClaim = fmt.silForPfh(pfh) === 'No SIL' && fmt.asilForPfh(pfh) === 'QM';
+            return noClaim
+                ? `<div class="res-qm">Quality-managed (QM) — no integrity claim at this rate.</div>`
+                : '';
+        };
+
+        let html = '';
+
+        // ── 0. FMEDA metrics: λ breakdown, SFF, SPFM/LFM ─────────────
+        if (rollup.metrics && rollup.metrics.total &&
+            rollup.metrics.total.lambdaTotal > 0) {
+            html += _fmedaMetricsHtml(rollup.metrics, simple);
+        }
+
+        // ── 1. Elements: achieved integrity ──────────────────────────
+        if (rollup.elements && rollup.elements.length) {
+            html += `<div class="res-section">Architecture elements</div>`;
+            rollup.elements.slice().sort((a, b) => a.integrityFit - b.integrityFit)
+              .forEach(elr => {
+                const pfh = toPfh(elr.integrityFit);
+                html += `
+                    <div class="res-card res-el-card">
+                        <div class="res-fn">${fmt.escHtml(elr.name)}
+                            <span class="res-id">${fmt.escHtml(elr.id)}</span>
+                            ${elr.level ? `<span class="res-lvl">${fmt.escHtml(elr.level)}</span>` : ''}</div>
+                        <div class="res-levels">${bandChips(pfh)}</div>
+                        <div class="res-pfh">integrity ${fmt.pfhDualStr(pfh)} · total residual ${fitStr(elr.residualFit)}</div>
+                        ${qmRemark(pfh)}
+                    </div>`;
+            });
+        }
+
+        // ── 2. Functions: residual, integrity-first ──────────────────
+        html += `<div class="res-section">Functions</div>`;
+        rollup.functions.forEach(f => {
+            const pfh = toPfh(f.residualFit);
+            const reduced = f.rawFit > 0
+                ? Math.round((1 - f.residualFit / f.rawFit) * 100) : 0;
+            let body;
+            if (simple) {
+                body = `
+                    <div class="res-nums">achieved ${fmt.pfhDualStr(pfh)}</div>
+                    <div class="res-levels">${bandChips(pfh)}</div>
+                    ${qmRemark(pfh)}`;
+            } else {
+                // Integrity-first, then the rate, then the reduction. When
+                // nothing was reduced we say so plainly instead of the
+                // confusing "X FIT of X FIT raw" (item 9).
+                const reductionLine = reduced > 0
+                    ? `<span class="res-cut">−${reduced}% vs ${fitStr(f.rawFit)} raw</span>`
+                    : `<span class="res-raw">no diagnostic credit (raw = residual)</span>`;
+                body = `
+                    <div class="res-levels">${bandChips(pfh)}</div>
+                    <div class="res-nums">residual <strong>${fitStr(f.residualFit)}</strong>
+                        &nbsp;·&nbsp; ${fmt.pfhDualStr(pfh)}</div>
+                    <div class="res-pfh">${reductionLine}</div>
+                    ${qmRemark(pfh)}`;
+            }
+            const allUnhandled = f.handledCount === 0 && f.total > 0;
+            const dInfo = f.derivedCount > 0
+                ? ` · ${f.derivedCount} derived` : '';
+            html += `
+                <div class="res-card">
+                    <div class="res-fn">${fmt.escHtml(f.name)}
+                        <span class="res-id">${fmt.escHtml(f.id)}</span>
+                        <span class="res-el">(${fmt.escHtml(f.elementName)})</span></div>
+                    ${body}
+                    <div class="res-handled ${allUnhandled ? 'res-handled-none' : ''}">${f.handledCount}/${f.total} failure modes handled${dInfo}</div>
+                </div>`;
+        });
+
+        // ── 3. Safety requirements (traceability) ────────────────────
+        const srs = (rollup.safetyRequirements && rollup.safetyRequirements.length)
+            ? rollup.safetyRequirements
+            : ((cb.getProject && cb.getProject() && cb.getProject().safetyRequirements)
+                ? cb.getProject().safetyRequirements() : []);
+        if (srs.length) {
+            html += `<div class="res-section">Safety requirements</div>`;
+            srs.forEach(sr => {
+                html += `
+                    <div class="res-card res-sr-card">
+                        <div class="res-fn"><span class="res-sr-id">${sr.srId}</span>
+                            ${fmt.escHtml(sr.name)}
+                            <span class="res-el">(${fmt.escHtml(sr.elementName)} · ${fmt.escHtml(sr.functionName)})</span></div>
+                        <div class="res-sr-mit">${fmt.escHtml(sr.mitigation)} <span class="res-raw">— DC ${Math.round(sr.dc * 100)}%</span></div>
+                    </div>`;
+            });
+        }
+
+        el.innerHTML = html;
+    }
+
     return {
         init,
         renderProject, applyAnalysis, clearAnalysis,
-        markDirty, setActiveScenario, setViewMode, setMode
+        markDirty, setActiveScenario, setViewMode, setMode,
+        setActiveNet, applyFmedaRollup
     };
 })();

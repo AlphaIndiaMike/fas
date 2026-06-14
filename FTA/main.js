@@ -13,6 +13,7 @@ const main = (() => {
     let project        = null;
     let activeScenario = null;
     let viewMode       = 'technical';   // 'technical' | 'simplified'
+    let _unsaved       = false;         // model changed since last save/load/new
 
     /* ── init ─────────────────────────────────────────────────────── */
 
@@ -22,6 +23,8 @@ const main = (() => {
             onGateClick:      id => dialogs.openGateEdit(id, null),
             onGroupClick:     id => dialogs.openGroupEdit(id),
             onLinkClick:      id => dialogs.openLinkEdit(id),
+            onFmedaNodeClick: _onFmedaNodeClick,
+            onNetEdgeClick:   _onNetEdgeClick,
             onPositionChange: _onPositionChange
         });
 
@@ -36,12 +39,13 @@ const main = (() => {
             onEditScenario:      sid => dialogs.openScenarioEdit(sid),
             onDeleteScenario:    _onDeleteScenario,
             onEventClick:        id  => dialogs.openEventEdit(id),
-            onGateClick:         id  => dialogs.openGateEdit(id, null)
+            onGateClick:         id  => dialogs.openGateEdit(id, null),
+            onNetChange:         net => { canvas.setActiveNet(net); }
         });
 
         dialogs.init({
             getProject:           () => project,
-            applyEventCreate:     d => { _placeNewEvent(d);            _modelChanged(); },
+            applyEventCreate:     d => { const id = _placeNewEvent(d); _modelChanged(); _revealNew(id); },
             applyEventUpdate:     (id, p) => { project.updateEvent(id, p); _modelChanged(); },
             applyEventDelete:     id => { project.deleteEvent(id);   _modelChanged(); },
             applyGateCreate:      d => { _placeNewGate(d);             _modelChanged(); },
@@ -54,6 +58,7 @@ const main = (() => {
                                     const g = project.addGroup(d);
                                     if (members) _setGroupMembers(g.id, members);
                                     _modelChanged();
+                                    _revealNew(g.id);
                                     return g.id;
                                   },
             applyGroupUpdate:     (id, p, members) => {
@@ -62,6 +67,11 @@ const main = (() => {
                                     _modelChanged();
                                   },
             applyGroupDelete:     id => { project.deleteGroup(id);   _modelChanged(); },
+            applyCopyFailureModes: (targetFnId, sourceIds) => {
+                                    (sourceIds || []).forEach(sid =>
+                                        project.copyFailureModeInto(sid, targetFnId));
+                                    _modelChanged();
+                                  },
             applyScenarioCreate:  d => { project.addScenario(d);     _modelChanged(); },
             applyScenarioUpdate:  (id, p) => { project.updateScenario(id, p); _modelChanged(); },
             applyScenarioDelete:  id => { project.deleteScenario(id); _modelChanged(); }
@@ -72,13 +82,44 @@ const main = (() => {
         _bindModeToggle();
         _showVersion();
         _showIntro();
+
+        // Guard against losing work on refresh/close. The browser shows its
+        // own generic confirmation when we set returnValue; we only arm it
+        // while there are unsaved changes, so a clean/just-saved project
+        // closes without nagging.
+        window.addEventListener('beforeunload', e => {
+            if (!_unsaved) return;
+            e.preventDefault();
+            e.returnValue = '';   // required for the prompt to show in Chrome
+            return '';
+        });
     }
 
     /* ── FTA / ETA mode toggle (header) ──────────────────────────────── */
 
     function _bindModeToggle() {
         document.querySelectorAll('.mode-btn').forEach(b => {
-            b.addEventListener('click', () => _setMode(b.getAttribute('data-appmode')));
+            b.addEventListener('click', () => {
+                if (b.classList.contains('disabled')) return;  // no project yet
+                _setMode(b.getAttribute('data-appmode'));
+            });
+        });
+        _setModeButtonsEnabled(false);   // disabled until a project exists
+    }
+
+    /* Enable/disable the FTA/ETA/FMEDA toggle. Before a project is started
+       there is nothing to switch, so the buttons are disabled and carry a
+       tooltip explaining why. */
+    function _setModeButtonsEnabled(on) {
+        document.querySelectorAll('.mode-btn').forEach(b => {
+            b.classList.toggle('disabled', !on);
+            if (on) {
+                // Restore the per-mode descriptive tooltip.
+                b.title = b.getAttribute('data-tip') || '';
+            } else {
+                if (!b.getAttribute('data-tip')) b.setAttribute('data-tip', b.title);
+                b.title = 'Start or open a project first to choose an analysis mode.';
+            }
         });
     }
 
@@ -99,7 +140,7 @@ const main = (() => {
     /* Push the current mode into the header pill, the catalog and the
        controls panel. Used both by the toggle and on project load. */
     function _syncModeUI(mode) {
-        const m = (mode === 'ETA') ? 'ETA' : 'FTA';
+        const m = ['ETA','FMEDA'].includes(mode) ? mode : 'FTA';
         document.querySelectorAll('.mode-btn').forEach(b =>
             b.classList.toggle('on', b.getAttribute('data-appmode') === m));
         catalog.setMode(m);
@@ -137,8 +178,10 @@ const main = (() => {
             b.classList.remove('show-catalog', 'show-controls');
         });
         document.addEventListener('keydown', e => {
-            if (e.key === 'Escape')
+            if (e.key === 'Escape') {
+                if (_netLink) { _netLink = null; _flash('Net link cancelled.'); }
                 document.body.classList.remove('show-catalog', 'show-controls');
+            }
         });
     }
 
@@ -168,9 +211,36 @@ const main = (() => {
        appears near where the user is looking. Falls back to the model's
        default (200,200) if cytoscape isn't ready yet. */
     function _placeNewEvent(data) {
-        const pos = canvas.viewportCenter ? canvas.viewportCenter() : null;
-        if (pos) { data.x = pos.x; data.y = pos.y; }
-        project.addEvent(data);
+        // FMEDA failure modes auto-stack inside their function; leave them
+        // unplaced (x/y = 0) so the FMEDA layout positions them. FTA/ETA
+        // events get dropped at the viewport center as before.
+        if (project.mode === 'FMEDA') {
+            data.x = 0; data.y = 0;
+        } else {
+            const pos = canvas.viewportCenter ? canvas.viewportCenter() : null;
+            if (pos) { data.x = pos.x; data.y = pos.y; }
+        }
+        const created = project.addEvent(data);
+        // addEvent only consumes name/kind/x/y/description/groupId and fills
+        // everything else from defaults. Apply the REMAINING draft fields
+        // (probMode, rate, DC, mitigation, evidence, target, …) so values
+        // typed in the CREATE dialog are not silently dropped. kind/name/pos/
+        // group are deliberately excluded — addEvent already set them, and
+        // re-applying kind here would re-trigger the single-top demotion.
+        const { name, kind, x, y, description, groupId, ...rest } = data;
+        project.updateEvent(created.id, rest);
+        return created.id;
+    }
+
+    /* After a create + re-render, pan a new FMEDA node into view if it would
+       otherwise sit off-screen (a freshly-added element shouldn't appear
+       outside the viewport). FTA/ETA nodes already spawn at the viewport
+       centre, so this is FMEDA-only. Deferred a tick so the canvas has laid
+       the node out first. */
+    function _revealNew(id) {
+        if (!id || !project || project.mode !== 'FMEDA') return;
+        if (!canvas.revealNode) return;
+        setTimeout(() => canvas.revealNode(id), 0);
     }
 
     /* Place a new gate at the centroid of its inputs + output so the
@@ -224,10 +294,41 @@ const main = (() => {
         canvas.render(project);
     }
 
+    /* Lightweight transient status toast (used by FMEDA net-link flow to
+       guide the two-click connect). Self-removing; no dependencies. */
+    let _flashTimer = null;
+    function _flash(msg) {
+        let el = document.getElementById('fasFlash');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'fasFlash';
+            el.setAttribute('role', 'status');
+            el.style.cssText =
+                'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);' +
+                'background:#2c2c2a;color:#fbfaf6;padding:8px 14px;border-radius:6px;' +
+                'font-size:13px;z-index:9999;max-width:520px;box-shadow:0 2px 8px rgba(0,0,0,0.25);';
+            document.body.appendChild(el);
+        }
+        el.textContent = msg;
+        el.style.display = 'block';
+        clearTimeout(_flashTimer);
+        _flashTimer = setTimeout(() => { el.style.display = 'none'; }, 4200);
+    }
+
     function _modelChanged() {
+        _unsaved = true;
         _refreshCanvas();
         controls.renderProject(project);
-        controls.markDirty();
+        // A model edit invalidates the last computed result. In FMEDA the
+        // residual roll-up is cleared outright (it must be recomputed before
+        // it means anything); FTA/ETA keep their last analysis on screen but
+        // flag it stale.
+        if (project && project.mode === 'FMEDA') {
+            _lastAnalysis = null;
+            controls.clearAnalysis();
+        } else {
+            controls.markDirty();
+        }
         _updateHeaderName();
     }
 
@@ -267,6 +368,161 @@ const main = (() => {
             case 'scenario':
                 dialogs.openScenarioEdit(null);
                 break;
+            // ── FMEDA ──
+            case 'fmeda-element':
+                _fmedaAddElement('low');
+                break;
+            case 'fmeda-function':
+                _fmedaAddFunction();
+                break;
+            case 'fmeda-fm':
+                _fmedaAddFailureMode();
+                break;
+            case 'fmeda-net-arch':
+            case 'fmeda-net-func':
+            case 'fmeda-net-fail':
+                _fmedaStartNetLink(kind.replace('fmeda-net-', ''));
+                break;
+        }
+    }
+
+    /* ── FMEDA create flows ──────────────────────────────────────────
+       Kept deliberately lightweight: create the node, re-render, and let
+       the user rename/edit it via its normal edit dialog. Elements and
+       functions reuse the group edit dialog; failure modes reuse the
+       event editor (basic event), which already has λ/coverage/evidence. */
+
+    function _fmedaAddElement(level) {
+        // Open the editor in CREATE mode with a draft — the element is only
+        // committed when the user clicks Save (Cancel leaves nothing behind).
+        dialogs.openGroupEdit(null, {
+            kind: 'element', level: level,
+            name: 'Element ' + (project.elementGroups().length + 1)
+        });
+    }
+
+    function _fmedaAddFunction() {
+        const elements = project.elementGroups();
+        if (!elements.length) {
+            alert('Add an architecture element first — a function lives inside one.');
+            return;
+        }
+        const parentId = (_fmedaSel.elementId &&
+                          project.groupById(_fmedaSel.elementId) &&
+                          project.groupById(_fmedaSel.elementId).kind === 'element')
+            ? _fmedaSel.elementId : elements[0].id;
+        dialogs.openGroupEdit(null, {
+            kind: 'function', parentId,
+            name: 'Function ' + (project.functionGroups().length + 1)
+        });
+    }
+
+    function _fmedaAddFailureMode() {
+        const fns = project.functionGroups();
+        if (!fns.length) {
+            alert('Add a function first — a failure mode lives inside one.');
+            return;
+        }
+        const fnId = (_fmedaSel.functionId &&
+                      project.groupById(_fmedaSel.functionId) &&
+                      project.groupById(_fmedaSel.functionId).kind === 'function')
+            ? _fmedaSel.functionId : fns[0].id;
+        // Draft a new failure mode; openEventEdit(null, draft) commits only
+        // on Save.
+        dialogs.openEventEdit(null, 'event-basic', {
+            groupId: fnId, x: 0, y: 0,
+            name: 'Failure mode ' + (project.basicEvents().length + 1)
+        });
+    }
+
+    /* Remember the last element/function the user touched, so "add
+       function / add failure mode" target the right container. */
+    const _fmedaSel = { elementId: null, functionId: null };
+
+    /* Net-link connect flow: prompt the user to click two nodes of the
+       right type. State is held in _netLink; the canvas tap handler
+       (below) completes the edge. */
+    let _netLink = null;
+    function _fmedaStartNetLink(net) {
+        _netLink = { net, from: null };
+        canvas.setActiveNet(net);     // show the net we're editing
+        controls.setActiveNet(net);   // and sync the toggle highlight
+        const first = net === 'fail'
+            ? 'Click the CAUSE failure first (the root), then the failure it propagates to.'
+            : (net === 'arch' ? 'Click the first element, then the one it connects to.'
+                              : 'Click the first function, then the one it connects to.');
+        _flash(first + ' Esc to cancel.');
+    }
+    function _fmedaNetClick(nodeId, nodeType) {
+        if (!_netLink) return false;
+        const wantType = _netLink.net === 'arch' ? 'fmeda-element'
+                       : _netLink.net === 'func' ? 'fmeda-function'
+                       : 'fmeda-fm';
+        if (nodeType !== wantType) return false;   // ignore wrong-type taps
+        if (!_netLink.from) {
+            _netLink.from = nodeId;
+            _flash(_netLink.net === 'fail'
+                ? 'Now click the EFFECT failure (the one this cause defeats).'
+                : 'Now click the second node to connect.');
+            return true;
+        }
+        // from = cause/source, to = effect/target. Direction matters for the
+        // failure net (cause → effect drives the common-cause finding).
+        const ed = project.addNetEdge({
+            net: _netLink.net, from: _netLink.from, to: nodeId });
+        _netLink = null;
+        if (ed) { _unsaved = true; controls.markDirty(); _refreshCanvas(); controls.renderProject(project); }
+        else    { _flash('These two could not be connected.'); }
+        return true;
+    }
+
+    /* Canvas tap on any FMEDA node. If a net-link is being drawn, try to
+       complete it; otherwise open the node's editor. */
+    /* Delete a failure/architecture/function net connection. Reuses the
+       same confirm-then-delete pattern as FTA links. */
+    function _onNetEdgeClick(edgeId) {
+        if (_netLink) return;   // mid-connect: ignore taps on edges
+        dialogs.confirm('Delete connection?',
+            'Remove this connection. (If it was one of several converging on a '
+            + 'target, the AND/OR gate collapses automatically.)',
+            () => {
+                project.deleteNetEdge(edgeId);
+                _unsaved = true;
+                _refreshCanvas();
+                controls.renderProject(project);
+            });
+    }
+
+    function _onFmedaNodeClick(id, type, targetId) {
+        if (_netLink && _fmedaNetClick(id, type)) return;
+        // Convergence gate: toggle AND/OR.
+        if (type === 'fmeda-failgate' && targetId) {
+            const cur = project.failGateOf(targetId);
+            project.setFailGate(targetId, cur === 'OR' ? 'AND' : 'OR');
+            _unsaved = true;
+            _refreshCanvas();
+            _flash('Convergence set to ' + project.failGateOf(targetId) +
+                   ' for this effect.');
+            return;
+        }
+        // Remember context so the next "add function/FM" targets here.
+        if (type === 'fmeda-element') {
+            _fmedaSel.elementId = id;
+            _fmedaSel.functionId = null;
+            dialogs.openGroupEdit(id);
+        } else if (type === 'fmeda-function') {
+            _fmedaSel.functionId = id;
+            const fn = project.groupById(id);
+            _fmedaSel.elementId = fn ? fn.parentId : _fmedaSel.elementId;
+            dialogs.openGroupEdit(id);
+        } else if (type === 'fmeda-fm') {
+            const e = project.eventById(id);
+            if (e && e.groupId) {
+                _fmedaSel.functionId = e.groupId;
+                const fn = project.groupById(e.groupId);
+                _fmedaSel.elementId = fn ? fn.parentId : _fmedaSel.elementId;
+            }
+            dialogs.openEventEdit(id);
         }
     }
 
@@ -276,9 +532,27 @@ const main = (() => {
         if (!project) return;
         if (kind === 'event') project.updateEvent(id, { x, y });
         if (kind === 'gate')  project.updateGate(id,  { x, y });
-        // Position changes don't need a re-render — but they do
-        // technically "change" the model, so we do NOT mark dirty.
-        // Probability math doesn't depend on (x, y).
+        if (kind === 'fmeda-fm') {
+            // FMEDA failure modes save their position; a moved layout is
+            // unsaved work worth guarding.
+            project.updateEvent(id, { x, y });
+            _unsaved = true;
+        }
+        if (kind === 'fmeda-element' || kind === 'fmeda-function') {
+            // Save the group's own spot (matters for EMPTY groups; populated
+            // ones derive from their children, whose positions are persisted
+            // alongside in the same drag).
+            project.updateGroup(id, { x, y });
+            _unsaved = true;
+        }
+        if (kind === 'fmeda-failgate') {
+            // The gate node id is '_fgate_<targetFailureId>'. Persist keyed by
+            // the target so the gate keeps its spot through re-render/reload.
+            const targetId = id.replace(/^_fgate_/, '');
+            project.setFailGatePos(targetId, x, y);
+            _unsaved = true;
+        }
+        // Probability math doesn't depend on (x, y); no re-render needed.
     }
 
     /* ── controls handlers ───────────────────────────────────────── */
@@ -306,6 +580,17 @@ const main = (() => {
 
     function _runAnalysis(scenarioId) {
         if (!project) return;
+        // FMEDA mode: no top event — Recalculate computes the residual
+        // dangerous-undetected rate per failure mode, rolled up per
+        // function and element, and shows it in the panel.
+        if (project.mode === 'FMEDA') {
+            const rollup = project.fmedaRollup();
+            rollup.safetyRequirements = project.safetyRequirements();
+            rollup.metrics = project.fmedaMetrics();
+            controls.applyFmedaRollup(rollup);
+            _refreshCanvas();   // refresh handled/green coloring too
+            return;
+        }
         // ETA mode: forward enumeration, no top event required.
         if (project.mode === 'ETA') {
             const result = analyzer.analyzeETA(project, scenarioId || null);
@@ -345,10 +630,19 @@ const main = (() => {
                 'You\'ll lose any unsaved changes to "' +
                 (project.name || 'this project') +
                 '". Use Save first if you want to keep it.',
-                () => dialogs.openNewProject(_proceedNewProject));
+                () => dialogs.openNewProject(_proceedNewProject, _proceedDemo));
             return;
         }
-        dialogs.openNewProject(_proceedNewProject);
+        dialogs.openNewProject(_proceedNewProject, _proceedDemo);
+    }
+
+    function _proceedDemo() {
+        fmt.resetUid();
+        project = (typeof demo !== 'undefined' && demo.build)
+            ? demo.build() : new Project('Demo');
+        activeScenario = null;
+        _lastAnalysis  = null;
+        _activate();
     }
 
     function _proceedNewProject(opts) {
@@ -375,6 +669,7 @@ const main = (() => {
         a.download = (project.name || 'fas-project').replace(/\s+/g, '_') + '.json';
         a.click();
         URL.revokeObjectURL(url);
+        _unsaved = false;   // work has been saved to a file
     }
 
     function triggerUpload() {
@@ -401,8 +696,10 @@ const main = (() => {
 
     function _activate() {
         _showStudio();
+        _unsaved = false;   // freshly created or loaded — nothing unsaved yet
         canvas.setEditable(true);
         catalog.setEnabled(true);
+        _setModeButtonsEnabled(true);
         // Reflect the loaded project's mode across the pill, catalog and
         // panel before the first render so ETA files open as event trees.
         _syncModeUI(project.mode);
@@ -425,7 +722,8 @@ const main = (() => {
     return {
         init,
         newProject, downloadProject, triggerUpload, exportReport,
-        getProject: () => project
+        getProject: () => project,
+        _test_pickCatalog: (kind) => _onCatalogPick(kind)
     };
 })();
 

@@ -106,8 +106,39 @@ const catalog = (() => {
         ]}
     ];
 
+    const FMEDA_ITEMS = [
+        { group: 'Architecture', help: 'fmedaArch', items: [
+            { kind: 'fmeda-element',
+              icon: '▣',  label: 'Architecture element',
+              hint: 'An architecture element. Choose its level (top / mid / low) in the editor.' }
+        ]},
+        { group: 'Function', help: 'fmedaFunction', items: [
+            { kind: 'fmeda-function',
+              icon: '⊞',  label: 'Function',
+              hint: 'A function inside an element. Holds the failure modes below it.' }
+        ]},
+        { group: 'Failure mode', help: 'fmedaFailureMode', items: [
+            { kind: 'fmeda-fm',
+              icon: '◯',  label: 'Failure mode',
+              hint: 'A leaf failure inside a function: rate, coverage, evidence.' }
+        ]},
+        { group: 'Nets', help: 'fmedaNets', items: [
+            { kind: 'fmeda-net-arch',
+              icon: '⇄',  label: 'Architecture link',
+              hint: 'Connect element ↔ element across levels.' },
+            { kind: 'fmeda-net-func',
+              icon: '⇄',  label: 'Function link',
+              hint: 'Connect function ↔ function across elements.' },
+            { kind: 'fmeda-net-fail',
+              icon: '⇄',  label: 'Failure link',
+              hint: 'Connect failure ↔ failure. One source hitting two functions = common cause.' }
+        ]}
+    ];
+
     function _itemsFor(mode) {
-        return mode === 'ETA' ? ETA_ITEMS : FTA_ITEMS;
+        if (mode === 'ETA')   return ETA_ITEMS;
+        if (mode === 'FMEDA') return FMEDA_ITEMS;
+        return FTA_ITEMS;
     }
 
     let enabled = true;
@@ -118,7 +149,7 @@ const catalog = (() => {
     function render(containerId, onPick, mode) {
         if (containerId) _containerId = containerId;
         if (onPick)      _onPick = onPick;
-        if (mode)        _mode = (mode === 'ETA') ? 'ETA' : 'FTA';
+        if (mode)        _mode = ['ETA','FMEDA'].includes(mode) ? mode : 'FTA';
         const root = document.getElementById(_containerId);
         if (!root) return;
         let html = '';
@@ -149,7 +180,7 @@ const catalog = (() => {
     }
 
     function setMode(mode) {
-        const m = (mode === 'ETA') ? 'ETA' : 'FTA';
+        const m = ['ETA','FMEDA'].includes(mode) ? mode : 'FTA';
         if (m === _mode) return;
         _mode = m;
         render();
