@@ -40,12 +40,26 @@ const main = (() => {
             onDeleteScenario:    _onDeleteScenario,
             onEventClick:        id  => dialogs.openEventEdit(id),
             onGateClick:         id  => dialogs.openGateEdit(id, null),
-            onNetChange:         net => { canvas.setActiveNet(net); }
+            onNetChange:         net => { canvas.setActiveNet(net); },
+            onAutoConnectFunctions: _autoConnectFunctions,
+            onAutoConnectFailures:  _autoConnectFailures
         });
 
         dialogs.init({
             getProject:           () => project,
             applyEventCreate:     d => { const id = _placeNewEvent(d); _modelChanged(); _revealNew(id); },
+            applyEventCreateMulti: (d, fnIds) => {
+                                    // Create one independent failure mode per
+                                    // selected function (same spec), with a
+                                    // single render at the end.
+                                    let firstId = null;
+                                    (fnIds || []).forEach((fnId, i) => {
+                                        const id = _placeNewEvent({ ...d, groupId: fnId });
+                                        if (i === 0) firstId = id;
+                                    });
+                                    _modelChanged();
+                                    _revealNew(firstId);
+                                  },
             applyEventUpdate:     (id, p) => { project.updateEvent(id, p); _modelChanged(); },
             applyEventDelete:     id => { project.deleteEvent(id);   _modelChanged(); },
             applyGateCreate:      d => { _placeNewGate(d);             _modelChanged(); },
@@ -490,6 +504,45 @@ const main = (() => {
                 _unsaved = true;
                 _refreshCanvas();
                 controls.renderProject(project);
+            });
+    }
+
+    /* Bulk: build the function net from the architecture net — every function
+       of a source element to every function of the target, per arch link.
+       Additive (existing links kept). Shows the failure/function net result. */
+    function _autoConnectFunctions() {
+        if (!project || project.mode !== 'FMEDA') return;
+        dialogs.confirm('Auto-connect functions from architecture?',
+            'For each architecture link, this connects every function of the ' +
+            'source element to every function of the target, in the link\'s ' +
+            'direction. Existing connections are kept; prune any that don\'t apply.',
+            () => {
+                const n = project.autoConnectFunctionsFromArch();
+                _modelChanged();
+                canvas.setActiveNet('func'); controls.setActiveNet('func');
+                _flash(n > 0
+                    ? 'Added ' + n + ' function connection' + (n === 1 ? '' : 's') + '.'
+                    : 'No new function connections — check that elements are linked and have functions.');
+            });
+    }
+
+    /* Bulk: build the failure net from the function net — every failure mode
+       of a source function to every failure mode of the target (cause →
+       effect), per function link. Complete bipartite; expect to prune. */
+    function _autoConnectFailures() {
+        if (!project || project.mode !== 'FMEDA') return;
+        dialogs.confirm('Auto-connect failure modes from functions?',
+            'For each function link, this connects every failure mode of the ' +
+            'source function to every failure mode of the target (cause → ' +
+            'effect), in the link\'s direction. This can create many links; ' +
+            'existing ones are kept. Prune the ones that don\'t physically apply.',
+            () => {
+                const n = project.autoConnectFailuresFromFunctions();
+                _modelChanged();
+                canvas.setActiveNet('fail'); controls.setActiveNet('fail');
+                _flash(n > 0
+                    ? 'Added ' + n + ' failure connection' + (n === 1 ? '' : 's') + '.'
+                    : 'No new failure connections — check that functions are linked and contain failure modes.');
             });
     }
 

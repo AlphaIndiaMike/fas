@@ -12,6 +12,11 @@
  *        – rate (FIT)                     — MCU "ALU stuck-at"
  *        – PFD (probability, %)           — Power "Overvoltage" (2 %)
  *        – PFD catastrophic               — Sensor A "Implausible" (50 %)
+ *   · safe failure rates (λ_S) on the handled leaves so SFF / SPFM are real
+ *     per element (the 50 % Sensor A is deliberately left λ_S = 0 — it is the
+ *     must-stay-QM single-point-fault calibration case, so the GRAND-TOTAL SFF
+ *     stays low on purpose: the tool is correctly penalising that one element)
+ *   · latent-fault coverage (DC₂) on two leaves so the LFM is non-zero
  *   · handled vs unhandled failure modes
  *   · derived effects (read-only) at mid and top levels
  *   · OR convergence and AND convergence (redundant sensors)
@@ -35,6 +40,7 @@ const demo = (function () {
         const ram = p.addEvent({ name: 'RAM bit flip', kind: 'basic', groupId: mcuFn.id });
         p.updateEvent(ram.id, {
             probMode: 'coverage', failureRateRaw: 200, diagnosticCoverage: 0.92,
+            diagnosticCoverageLatent: 0.6, failureRateSafe: 1800,
             mitigation: 'ECC on RAM; uncorrectable error forces the safe state within 10 ms.',
             diagnosticEvidence: 'ISO 26262-5:2018 Annex D, Table D.4 (EDC/ECC).'
         });
@@ -46,12 +52,13 @@ const demo = (function () {
         const ov = p.addEvent({ name: 'Overvoltage', kind: 'basic', groupId: pwrFn.id });
         p.updateEvent(ov.id, {
             probMode: 'direct', directUnit: 'PFD', probability: 0.02,   // 2 %
-            diagnosticCoverage: 0.9,
+            diagnosticCoverage: 0.9, failureRateSafe: 800,
             mitigation: 'Independent over-voltage comparator disables the rail and signals fault.'
         });
         const loss = p.addEvent({ name: 'Total loss of supply', kind: 'basic', groupId: pwrFn.id });
         p.updateEvent(loss.id, {
             probMode: 'rate', failureRate: 80, diagnosticCoverage: 0.99,
+            diagnosticCoverageLatent: 0.5, failureRateSafe: 720,
             mitigation: 'Redundant LDO with cross-monitoring; loss is detected and annunciated.'
         });
 
@@ -67,6 +74,7 @@ const demo = (function () {
         const implB = p.addEvent({ name: 'Implausible reading', kind: 'basic', groupId: senBFn.id });
         p.updateEvent(implB.id, {
             probMode: 'rate', failureRate: 40, diagnosticCoverage: 0.7,
+            failureRateSafe: 360,
             mitigation: 'Range and rate-of-change plausibility check on the channel.'
         });
 

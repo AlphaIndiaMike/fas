@@ -67,6 +67,13 @@ const controls = (() => {
                     <button type="button" class="fmeda-net-btn"    data-net="func">Function net</button>
                     <button type="button" class="fmeda-net-btn"    data-net="fail">Failure net</button>
                 </div>
+                <div class="ctrl-section-hd" style="margin-top:12px">Auto-connect</div>
+                <div class="fmeda-autoconnect" style="display:flex;flex-direction:column;gap:6px">
+                    <button type="button" class="btn btn-sec" id="btnAutoFunc"
+                            title="For each architecture link, connect every function of the source element to every function of the target.">⇄ Functions from architecture</button>
+                    <button type="button" class="btn btn-sec" id="btnAutoFail"
+                            title="For each function link, connect every failure mode of the source function to every failure mode of the target (cause → effect).">⇄ Failure modes from functions</button>
+                </div>
                 <div class="ctrl-section-hd" style="margin-top:12px">Common-cause findings</div>
                 <div id="ctrlCommonCause" class="ctrl-commoncause">
                     <div class="ctrl-empty">Build the failure net — one failure
@@ -141,6 +148,12 @@ const controls = (() => {
                 });
             });
         }
+        const btnAF = document.getElementById('btnAutoFunc');
+        if (btnAF) btnAF.addEventListener('click', () =>
+            cb.onAutoConnectFunctions && cb.onAutoConnectFunctions());
+        const btnAL = document.getElementById('btnAutoFail');
+        if (btnAL) btnAL.addEventListener('click', () =>
+            cb.onAutoConnectFailures && cb.onAutoConnectFailures());
     }
 
     /* Switch the panel between FTA and ETA. Both modes share the same
@@ -592,14 +605,6 @@ const controls = (() => {
             b.classList.toggle('on', b.getAttribute('data-net') === net));
     }
 
-    /* Render the FMEDA residual roll-up (from Recalculate). Three sections:
-         1. ELEMENTS — each architecture element with its achieved integrity
-            band (SIL/ASIL chips, shaded). The most stringent function sets
-            the element band (item E).
-         2. FUNCTIONS — per-function residual presented integrity-first with
-            a plain QM remark when there is no integrity claim (item 9).
-         3. SAFETY REQUIREMENTS — the numbered SRn list for traceability
-            (item D). */
     /* Render the FMEDA hardware-metric breakdown: the IEC 61508 λ split and
        SFF, plus the ISO 26262 SPF/RF/MPF mapping and SPFM/LFM. Computed over
        leaf failure modes; λ_S = 0 (no safe-failure portion modelled). */
@@ -622,7 +627,7 @@ const controls = (() => {
                 ${row('λ<sub>MPF,latent</sub> — latent', fit(t.lambdaMPFlatent))}
                 ${row('Single-Point Fault Metric (SPFM)', pct(t.spfm))}
                 ${row('Latent-Fault Metric (LFM)', pct(t.lfm))}
-                <div class="res-m-note">No safe-failure portion modelled (λ<sub>S</sub> = 0), so λ<sub>SD</sub> = λ<sub>SU</sub> = 0; λ<sub>Total</sub> sums dangerous rates only and SFF is a conservative floor (safe failures would raise it). Computed over leaf failure modes — the achieved metric to check against your HARA target.</div>
+                <div class="res-m-note">λ<sub>S</sub> is the entered safe-failure rate (default 0). λ<sub>SD</sub> = 0 (no safe-detected split modelled); all of λ<sub>S</sub> sits in λ<sub>SU</sub>. SFF = (Σλ<sub>S</sub> + Σλ<sub>DD</sub>) / Σλ<sub>Total</sub>; with λ<sub>S</sub> = 0 it is a conservative floor. Computed over leaf failure modes — the achieved metric to check against your HARA target.</div>
             </div>`;
         if (metrics.elements && metrics.elements.length > 1) {
             metrics.elements.slice()
@@ -639,6 +644,11 @@ const controls = (() => {
         return h;
     }
 
+    /* Render the FMEDA residual roll-up (from Recalculate), in three
+       sections: architecture elements with their achieved integrity band
+       (the most stringent function sets the element band); per-function
+       residual, integrity-first, with a plain QM remark when there is no
+       integrity claim; and the numbered SRn safety-requirement list. */
     function applyFmedaRollup(rollup) {
         _lastFmedaRollup = rollup || null;   // remember for view-mode re-render
         const el = document.getElementById('ctrlResidual');
@@ -709,7 +719,7 @@ const controls = (() => {
             } else {
                 // Integrity-first, then the rate, then the reduction. When
                 // nothing was reduced we say so plainly instead of the
-                // confusing "X FIT of X FIT raw" (item 9).
+                // confusing "X FIT of X FIT raw".
                 const reductionLine = reduced > 0
                     ? `<span class="res-cut">−${reduced}% vs ${fitStr(f.rawFit)} raw</span>`
                     : `<span class="res-raw">no diagnostic credit (raw = residual)</span>`;

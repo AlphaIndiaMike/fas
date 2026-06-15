@@ -7,10 +7,16 @@
  * propagation (runtime values are owned by analyzer.js). This
  * separation keeps each module focused.
  *
- * JSON file format (v2):
+ * JSON file format (v5):
  *   {
- *     name, version, missionTime,
- *     groups:    [{ id, name, color, description }],
+ *     name, version, mode, missionTime,
+ *     fta:   { …sub-model… },        // independent FTA model
+ *     eta:   { …sub-model… },        // independent ETA model
+ *     fmeda: { …sub-model… }         // independent FMEDA model
+ *   }
+ *   Each sub-model:
+ *   {
+ *     groups:    [{ id, name, color, description, parentId, kind, level, x, y }],
  *     events:    [{ id, name, kind, description, groupId, x, y,
  *                   probMode,             // 'direct' | 'rate' | 'coverage'
  *                   probability,          // direct
@@ -18,13 +24,20 @@
  *                   failureRate,          // FIT (rate)
  *                   missionTimeOverride,  // h   (rate, optional)
  *                   failureRateRaw,       // FIT (coverage)
- *                   diagnosticCoverage    // 0–1 (coverage)
+ *                   diagnosticCoverage,   // 0–1 (coverage, DC₁)
+ *                   diagnosticCoverageLatent, // 0–1 (coverage, DC₂)
+ *                   diagnosticEvidence, mitigation, target
  *                }],
  *     gates:     [{ id, type, inputs:[eventId], output:eventId,
  *                   k, inhibitProb, x, y }],
- *     links:     [{ id, from:eventId, to:eventId }],   // v2+ (optional)
- *     scenarios: [{ id, name, overrides:[{eventId, forcedProbability}] }]
+ *     links:     [{ id, from:eventId, to:eventId }],
+ *     scenarios: [{ id, name, overrides:[{eventId, forcedProbability}] }],
+ *     netEdges:  [{ id, net, from, to }],          // FMEDA only
+ *     failGates: { targetFailureId: 'AND'|'OR' },  // FMEDA only
+ *     failGatePos: { targetFailureId: {x,y} }      // FMEDA only
  *   }
+ *   Legacy files (v1–v4 flat top-level arrays) load as the FTA sub-model;
+ *   see fromJSON.
  *
  * kind  = 'basic' | 'intermediate' | 'top'         (events)
  * type  = 'AND' | 'OR' | 'VOTING' | 'INHIBIT'      (gates)
@@ -255,6 +268,9 @@ class Project {
                     !doomed.has(ed.from) && !doomed.has(ed.to) &&
                     !goneEvents.has(ed.from) && !goneEvents.has(ed.to));
             }
+            // Drop convergence-gate state (AND/OR choice, saved position) for
+            // any failure mode removed with its function/element.
+            this._purgeFailRefs(goneEvents);
         } else {
             // FTA & ETA: the group is only a label — events survive and
             // fall back to "ungrouped" (unchanged legacy behaviour).
@@ -312,26 +328,19 @@ class Project {
         // approximate via equivalent constant rate over mission time.
         if (e.probMode === 'direct') {
             if (e.directUnit === 'PFH') return Math.max(0, +e.probability || 0) * 1e9;
-            // PFD → equivalent FIT. Use the LINEAR small-probability form
-            // (PFD / t), not −ln(1−PFD)/t: the log form turned an entered 2 %
-            // into a displayed 2.02 %. Linear keeps "enter 2 % → see 2 %" and
-            // is the standard first-order convention for small probabilities.
-            // PFD → equivalent FIT. Two effects are combined and the WORSE
-            // (higher) one wins:
-            //   • mission-time rate  (PFD / t)·1e9  — so that, combined with
-            //     other rates over the mission, the contribution equals PFD;
-            //   • a band floor  PFD·1e5 FIT (= PFD·1e-4 /h) — the IEC 61508
-            //     low-demand↔high-demand correspondence (a PFD band maps to
-            //     the PFH band of the same SIL: SIL2 PFD 1e-3..1e-2 ↔ PFH
-            //     1e-7..1e-6, etc.). Without the floor a long mission time
-            //     dilutes a catastrophic probability into a tiny rate, which
-            //     would let a 50 % PFD masquerade as ASIL D. The floor makes
-            //     the achieved integrity of a PFD mission-time-independent and
-            //     never better than its low-demand band allows. (The two
-            //     coincide at t = 1e4 h, the reference mission time, so normal
-            //     automotive models are unchanged.)
-            // We keep the LINEAR small-probability form (PFD / t), not the log
-            // form −ln(1−PFD)/t which turned an entered 2 % into 2.02 %.
+            // PFD → equivalent FIT. Combine two effects and take the WORSE
+            // (higher) one:
+            //   • mission-time rate (PFD / t)·1e9 — so that, combined with
+            //     other rates over the mission, its contribution equals PFD;
+            //   • a band floor PFD·1e5 FIT (= PFD·1e-4 /h) — the IEC 61508
+            //     low↔high-demand correspondence (a PFD band maps to the PFH
+            //     band of the same SIL). Without the floor a long mission
+            //     time would dilute a catastrophic probability into a tiny
+            //     rate, letting a 50 % PFD masquerade as ASIL D. The two
+            //     coincide at t = 1e4 h (the reference mission time), so
+            //     normal automotive models are unchanged.
+            // Linear PFD / t is used deliberately, not −ln(1−PFD)/t: the log
+            // form turned an entered 2 % into a displayed 2.02 %.
             const t = e.missionTimeOverride || this.missionTime || 1;
             const pfd = Math.max(0, +e.probability || 0);
             const rate  = t > 0 ? (pfd / t) * 1e9 : 0;
@@ -551,26 +560,28 @@ class Project {
     }
 
     /* ── FMEDA hardware metrics (IEC 61508 SFF; ISO 26262 SPF/RF/MPF) ──────
-       Computed over the LEAF (low-level) failure modes — the elementary
-       dangerous failure rates the user enters. Derived (top/mid) modes are
-       roll-ups of those leaves, not independent contributors, so summing them
-       too would double-count; they are excluded here.
+       Computed over the LEAF (low-level) failure modes. Derived (top/mid)
+       modes are roll-ups of those leaves, not independent contributors, so
+       summing them too would double-count; they are excluded here.
 
-       No-safe-failure assumption (confirmed): every entered rate is dangerous
-       (λ_S = 0), so λ_SD = λ_SU = 0 and SFF reduces to the detected-dangerous
-       fraction. Per leaf with dangerous rate λ, primary coverage DC₁ and
-       latent coverage DC₂:
-         λ_DD          = λ·DC₁                  detected dangerous
-         λ_DU          = λ·(1−DC₁)              undetected dangerous (= residual)
-         λ_SPF         = λ            (DC₁ = 0) single-point fault, no mechanism
-         λ_RF          = λ·(1−DC₁)    (DC₁ > 0) residual of a covered fault
+       Per leaf: dangerous rate λ_D (from fmedaRawFit), safe rate λ_S
+       (failureRateSafe, default 0), primary coverage DC₁, latent coverage DC₂.
+         λ_total       = λ_D + λ_S
+         λ_SU          = λ_S                    safe (no safe-DC modelled)
+         λ_DD          = λ_D·DC₁                detected dangerous
+         λ_DU          = λ_D·(1−DC₁)            undetected dangerous (= residual)
+         λ_SPF         = λ_D          (DC₁ = 0) single-point fault, no mechanism
+         λ_RF          = λ_D·(1−DC₁)  (DC₁ > 0) residual of a covered fault
                           (λ_SPF + λ_RF = λ_DU)
-         λ_MPF,dp      = λ·DC₁                  caught by the primary mechanism
-         λ_MPF,latent  = λ·DC₁·(1−DC₂)          missed by the latent-fault check
+         λ_MPF,dp      = λ_D·DC₁                caught by the primary mechanism
+         λ_MPF,latent  = λ_D·DC₁·(1−DC₂)        missed by the latent-fault check
        Aggregated (per element and grand total):
-         SFF  = Σλ_DD / Σλ
-         SPFM = 1 − Σ(λ_SPF + λ_RF) / Σλ
-         LFM  = 1 − Σλ_MPF,latent / Σ(λ − λ_SPF − λ_RF) */
+         SFF  = Σ(λ_S + λ_DD) / Σλ_total
+         SPFM = 1 − Σ(λ_SPF + λ_RF) / Σλ_total
+         LFM  = 1 − Σλ_MPF,latent / Σ(λ_total − λ_SPF − λ_RF)
+       With λ_S = 0 (the default) SFF collapses to the detected-dangerous
+       fraction, exactly as before this field existed — so untouched models
+       keep their numbers; entering λ_S lifts SFF/SPFM off that floor. */
     fmedaMetrics() {
         const blank = () => ({
             lambdaTotal: 0, lambdaSD: 0, lambdaSU: 0, lambdaDD: 0, lambdaDU: 0,
@@ -584,20 +595,24 @@ class Project {
             if (this.fmedaIsDerived(e.id)) return;             // leaves only
             const fn = this.groupById(e.groupId);
             if (!fn || fn.kind !== 'function') return;
-            const lam = this.fmedaRawFit(e);
-            if (!(lam > 0)) return;
+            const lamD = this.fmedaRawFit(e);                  // dangerous rate
+            const lamS = Math.max(0, +e.failureRateSafe || 0); // safe rate λ_S
+            if (!(lamD > 0) && !(lamS > 0)) return;            // nothing to count
             const dc1 = fmt.clamp(e.diagnosticCoverage, 0, 1, 0);
             const dc2 = fmt.clamp(e.diagnosticCoverageLatent, 0, 1, 0);
             const hasSM = dc1 > 0;
             const contrib = {
-                lambdaTotal: lam,
-                lambdaSD: 0, lambdaSU: 0,
-                lambdaDD: lam * dc1,
-                lambdaDU: lam * (1 - dc1),
-                lambdaSPF: hasSM ? 0 : lam,
-                lambdaRF:  hasSM ? lam * (1 - dc1) : 0,
-                lambdaMPFdp:     lam * dc1,
-                lambdaMPFlatent: lam * dc1 * (1 - dc2),
+                lambdaTotal: lamD + lamS,
+                // Safe failures are credited as safe regardless of any safe
+                // diagnostic, so the whole λ_S sits in λ_SU (no safe-detected
+                // split is modelled — it would not change SFF/SPFM/LFM).
+                lambdaSD: 0, lambdaSU: lamS,
+                lambdaDD: lamD * dc1,
+                lambdaDU: lamD * (1 - dc1),
+                lambdaSPF: hasSM ? 0 : lamD,
+                lambdaRF:  hasSM ? lamD * (1 - dc1) : 0,
+                lambdaMPFdp:     lamD * dc1,
+                lambdaMPFlatent: lamD * dc1 * (1 - dc2),
                 count: 1
             };
             const el = this.elementOf(fn.id);
@@ -614,7 +629,10 @@ class Project {
         });
         const finalize = (a) => {
             const rf = a.lambdaSPF + a.lambdaRF;
-            a.sff  = a.lambdaTotal > 0 ? a.lambdaDD / a.lambdaTotal : null;
+            // SFF = (safe + dangerous-detected) / total. With a real λ_S this
+            // is no longer pinned to the detected-dangerous fraction.
+            a.sff  = a.lambdaTotal > 0
+                ? (a.lambdaSD + a.lambdaSU + a.lambdaDD) / a.lambdaTotal : null;
             a.spfm = a.lambdaTotal > 0 ? 1 - rf / a.lambdaTotal : null;
             const mpfBase = a.lambdaTotal - rf;
             a.lfm  = mpfBase > 0 ? 1 - a.lambdaMPFlatent / mpfBase : null;
@@ -652,6 +670,47 @@ class Project {
     }
 
     netEdgesOf(net) { return this.netEdges.filter(e => e.net === net); }
+
+    /* ── Bulk auto-connect (scaffolding helpers) ──────────────────────
+       Build the lower nets from the higher one so a model can be wired in
+       bulk and then pruned, instead of edge-by-edge. Both are additive and
+       idempotent — addNetEdge dedups (either direction), so re-running adds
+       only what is missing and never removes anything. Each returns the
+       number of NEW edges created. */
+
+    /* For every architecture edge (elementA → elementB), connect every
+       function of A to every function of B, in the edge's direction. */
+    autoConnectFunctionsFromArch() {
+        if (this.mode !== 'FMEDA') return 0;
+        let created = 0;
+        this.netEdgesOf('arch').forEach(ed => {
+            const srcFns = this.functionGroups().filter(f => f.parentId === ed.from);
+            const dstFns = this.functionGroups().filter(f => f.parentId === ed.to);
+            srcFns.forEach(sf => dstFns.forEach(df => {
+                if (this.addNetEdge({ net: 'func', from: sf.id, to: df.id })) created++;
+            }));
+        });
+        return created;
+    }
+
+    /* For every function edge (functionA → functionB), connect every failure
+       mode of A to every failure mode of B, in the edge's direction
+       (from = cause, to = effect). This is a complete bipartite scaffold —
+       expect to prune links that don't physically apply. */
+    autoConnectFailuresFromFunctions() {
+        if (this.mode !== 'FMEDA') return 0;
+        let created = 0;
+        const fmsOf = fnId =>
+            this.events.filter(e => e.kind === 'basic' && e.groupId === fnId);
+        this.netEdgesOf('func').forEach(ed => {
+            const srcFms = fmsOf(ed.from);
+            const dstFms = fmsOf(ed.to);
+            srcFms.forEach(sf => dstFms.forEach(df => {
+                if (this.addNetEdge({ net: 'fail', from: sf.id, to: df.id })) created++;
+            }));
+        });
+        return created;
+    }
 
     /* ── Failure-net propagation gates ────────────────────────────────
        When two or more failure-net edges converge on the SAME target
@@ -805,7 +864,7 @@ class Project {
     }
 
     /* Copy an existing failure mode into a target function as a NEW, fully
-       independent failure mode (item 4). The description and all reliability
+       independent failure mode. The description and all reliability
        properties are duplicated; the copy gets its own FM_n id, no saved
        position (so it auto-places) and no net edges (a copy is a fresh node,
        not the same node). Returns the new event, or null if inputs are bad. */
@@ -830,6 +889,7 @@ class Project {
             failureRateRaw:     src.failureRateRaw,
             diagnosticCoverage: src.diagnosticCoverage,
             diagnosticCoverageLatent: src.diagnosticCoverageLatent || 0,
+            failureRateSafe:    src.failureRateSafe || 0,
             diagnosticEvidence: src.diagnosticEvidence || '',
             mitigation:         src.mitigation || '',
             missionTimeOverride: src.missionTimeOverride
@@ -871,6 +931,11 @@ class Project {
             diagnosticCoverage:  d.diagnosticCoverage,
             /* DC₂ — latent-fault coverage (ISO 26262 LFM). Default 0. */
             diagnosticCoverageLatent: d.diagnosticCoverageLatent || 0,
+            /* Safe failure rate λ_S (FIT) — failures of this mode with no
+               hazardous effect. Default 0 (nothing credited as safe). Feeds
+               λ_total and the SFF / SPFM numerators; does NOT affect the
+               residual (PMHF) rate, which is dangerous-undetected only. */
+            failureRateSafe:     d.failureRateSafe || 0,
             /* Evidence / justification for the coverage claim — empty by
                default. Surfaced in dialogs only when probMode='coverage'. */
             diagnosticEvidence:  '',
@@ -928,6 +993,25 @@ class Project {
         this.scenarios.forEach(s => {
             s.overrides = s.overrides.filter(o => o.eventId !== id);
         });
+        // FMEDA: a failure mode is a failure-net node. Drop any failure-net
+        // edge touching it and any convergence-gate state keyed to it, so a
+        // deleted mode never leaves orphan edges or a stale AND/OR gate
+        // behind (no-op in FTA/ETA, where these are empty).
+        this._purgeFailRefs(new Set([id]));
+    }
+
+    /* Remove failure-net edges and convergence-gate state (AND/OR choice and
+       saved gate position) referencing any of the given failure ids. Shared
+       by deleteEvent and deleteGroup so a removed failure mode is fully
+       detached from the failure net. */
+    _purgeFailRefs(ids) {
+        if (!ids || ids.size === 0) return;
+        if (this.netEdges && this.netEdges.length) {
+            this.netEdges = this.netEdges.filter(
+                ed => !ids.has(ed.from) && !ids.has(ed.to));
+        }
+        if (this._failGates) ids.forEach(id => delete this._failGates[id]);
+        if (this._failGatePos) ids.forEach(id => delete this._failGatePos[id]);
     }
 
     /* ── Gate CRUD ────────────────────────────────────────────────── */
@@ -1182,6 +1266,7 @@ class Project {
                                                 d.diagnosticCoverage),
                 diagnosticCoverageLatent: fmt.clamp(e.diagnosticCoverageLatent, 0, 1,
                                                 d.diagnosticCoverageLatent || 0),
+                failureRateSafe:     _num(e.failureRateSafe, d.failureRateSafe || 0),
                 diagnosticEvidence:  e.diagnosticEvidence || '',
                 mitigation:          e.mitigation || '',
                 target:              target

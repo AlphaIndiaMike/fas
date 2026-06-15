@@ -641,8 +641,6 @@ const canvas = (() => {
         });
     }
 
-    function getViewMode() { return viewMode; }
-
     /* ── PNG export ──────────────────────────────────────────────── */
 
     /* Build a PNG data URL of the current canvas. `mode` controls label
@@ -721,7 +719,7 @@ const canvas = (() => {
         applyAnalysis, resetVisuals,
         setEditable, autoLayout, fit,
         viewportCenter, nodePosition, revealNode,
-        setViewMode, getViewMode,
+        setViewMode,
         setActiveNet, getActiveNet,
         exportPNG
     };

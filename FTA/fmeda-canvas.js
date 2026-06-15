@@ -11,7 +11,7 @@
  *     leftmost, then mid, then low) — the level is implied by the column,
  *     not drawn as a labelled band. Each element contains its functions
  *     (nested compound nodes); each function contains its failure-mode
- *     events.   element ⊃ function ⊃ failure mode   (your ASCII, rendered)
+ *     events.   element ⊃ function ⊃ failure mode
  *   · Edges for exactly ONE net at a time (the active net), chosen by the
  *     right-pane toggle:
  *       'arch' — element ↔ element
@@ -211,7 +211,7 @@ const fmedaCanvas = (() => {
                 else if (handled && dc > 0) sub = 'DC ' + Math.round(dc * 100) + '%';
                 else if (handled)    sub = 'handled';
                 else                 sub = '';
-                // Severity (item B): shade the node by the integrity band the
+                // Severity: shade the node by the integrity band the
                 // mode's residual reaches — QM/No-SIL is the worst (bad),
                 // anything that clears a SIL band is ok. Unhandled leaves with
                 // a real residual read as a problem.
@@ -220,7 +220,7 @@ const fmedaCanvas = (() => {
                 const severity = !handled && resFit > 0
                     ? (band === 'QM' ? 'bad' : 'warn')
                     : 'ok';
-                // Achieved-metric line (item #4): residual FIT and the SIL/ASIL
+                // Achieved-metric line: residual FIT and the SIL/ASIL
                 // band it reaches, shown beneath the DC line. Rebuilt on every
                 // render, so it tracks edits and Recalculate.
                 const silB  = fmt.silForPfh(resFit * 1e-9);
@@ -250,10 +250,8 @@ const fmedaCanvas = (() => {
             });
         });
 
-        // Functions get their parent set after the FM loop is irrelevant —
-        // set it inline. (Done above via data.parent on FMs; set element
-        // parent on functions and function parent already implied by nest.)
-        // Patch: ensure function nodes carry their element parent.
+        // Ensure each function node carries its element parent so cytoscape
+        // nests it inside the right element compound.
         els.forEach(node => {
             if (node.data && node.data.type === 'fmeda-function') {
                 const fn = project.groupById(node.data.id);
@@ -379,7 +377,7 @@ const fmedaCanvas = (() => {
                     // Functions: muted SLATE-SAGE. Deliberately de-saturated
                     // and shifted toward blue-grey so the only vivid green in
                     // the diagram is a HANDLED failure mode — the two greens
-                    // no longer read as the same signal (item C).
+                    // no longer read as the same signal.
                     'background-color': '#E4E9E4', 'background-opacity': 0.7,
                     'border-width': 1, 'border-color': '#7E8C84',
                     'label': 'data(label)',

@@ -13,8 +13,8 @@ const CONFIG = {
        and stamped into exported reports / saved projects. BUMP THIS ON
        EVERY ITERATION of development — patch for fixes, minor for new
        features, major for breaking changes. */
-    appVersion:  '1.9.3',
-    releaseDate: '2026-06-14',
+    appVersion:  '2.2.0',
+    releaseDate: '2026-06-15',
 
     /* JSON file-format version. v2 added direct links; v3 was an earlier
        (now removed) ETA experiment; v4 stores two fully independent
@@ -40,10 +40,16 @@ const CONFIG = {
                                         // fresh failure mode carries its FULL
                                         // raw rate until a DC is entered — no
                                         // unearned diagnostic credit.
-        diagnosticCoverageLatent: 0     // 0–1 (DC₂). Coverage of the mechanism
+        diagnosticCoverageLatent: 0,    // 0–1 (DC₂). Coverage of the mechanism
                                         // that reveals a LATENT (multiple-point)
                                         // fault. Drives the ISO 26262 latent-
                                         // fault metric (λ_MPF,latent / LFM).
+        failureRateSafe:    0           // FIT. Safe failure rate λ_S of this
+                                        // mode (failures with no hazardous
+                                        // effect). Default 0: nothing is
+                                        // credited as safe until entered, so
+                                        // SFF stays a conservative floor. Feeds
+                                        // λ_total and the SFF/SPFM numerators.
     },
 
     /* FMEDA-specific defaults. A failure mode is most naturally entered as a
@@ -231,6 +237,48 @@ const CONFIG = {
                 '<li><em>"Sensor range check per requirement REQ-SAF-112; 60 % credit (Annex D row \'comparison with another range\') — to be validated by fault-injection test FIT-014."</em></li>' +
                 '</ul>'
         },
+        fmedaInput: {
+            title: 'Specifying an FMEDA failure mode',
+            body:
+                '<p>An FMEDA failure mode is characterised by its <strong>dangerous failure rate</strong> and the <strong>diagnostic coverage</strong> that catches it. Pick the form that matches your source data — all four feed the same hardware metrics (residual λ<sub>DU</sub>, SFF, SPFM, LFM).</p>' +
+                '<p><strong>Failure rate (FIT) + diagnostic coverage</strong> — the natural FMEDA input. Enter the dangerous rate <code>λ<sub>D</sub></code> in FIT, the primary coverage <code>DC₁</code> (0–1) and, if a latent-fault check exists, <code>DC₂</code>. The residual that propagates is <code>λ<sub>DU</sub> = λ<sub>D</sub> × (1 − DC₁)</code>. Example: λ<sub>D</sub> = 120 FIT, DC₁ = 0.9 → residual 12 FIT.</p>' +
+                '<p><strong>Failure rate (FIT)</strong> — a dangerous rate with no diagnostic credit (DC₁ = 0): the full rate is undetected. Use when there is no safety mechanism.</p>' +
+                '<p><strong>Probability per hour (PFH)</strong> — the same dangerous rate expressed in /h. Conversion: <code>FIT = PFH × 10⁹</code> (e.g. 2×10⁻⁷ /h = 200 FIT).</p>' +
+                '<p><strong>Probability of failure (%)</strong> — a mission-time probability (PFD), for low-demand or probability-sourced data. It is converted to an equivalent FIT for roll-up: <code>λ ≈ (PFD / t)×10⁹</code>, floored at the IEC 61508 low-/high-demand band of the same SIL so a long mission time can\'t dilute a catastrophic PFD. Prefer a rate (FIT/PFH) in FMEDA where you have one.</p>' +
+                '<p><strong>Safe failure rate λ<sub>S</sub></strong> (separate field) — failures of this mode with no hazardous effect. It does not change the residual/PMHF, but it is needed for a realistic <strong>SFF</strong> and <strong>SPFM</strong>: <code>SFF = (Σλ<sub>S</sub> + Σλ<sub>DD</sub>) / Σλ<sub>total</sub></code>. Leave it 0 and SFF stays a conservative floor.</p>'
+        },
+        safeRate: {
+            title: 'Safe failure rate (λ_S)',
+            body:
+                '<p><strong>λ<sub>S</sub></strong> is the rate (FIT) of failures of this mode that have <em>no</em> hazardous effect — the safe portion of the part\'s failures. In a full FMEDA each (sub)element\'s rate splits into safe (λ<sub>S</sub>) and dangerous (λ<sub>D</sub>); the dangerous part then splits into detected/undetected by DC₁.</p>' +
+                '<p>It feeds two figures and nothing else:</p>' +
+                '<ul>' +
+                '<li><strong>SFF</strong> = (Σλ<sub>S</sub> + Σλ<sub>DD</sub>) / Σλ<sub>total</sub> — safe failures count in the numerator, so a realistic λ<sub>S</sub> lifts SFF off the detected-dangerous floor.</li>' +
+                '<li><strong>SPFM</strong> denominator (Σλ<sub>total</sub>) grows, so SPFM rises — safe failures are not single-point faults.</li>' +
+                '</ul>' +
+                '<p>It does <strong>not</strong> affect the residual dangerous-undetected rate (λ<sub>DU</sub>) or the PMHF / integrity band, which are dangerous-only.</p>' +
+                '<p><strong>Default 0</strong> (nothing credited as safe). Source λ<sub>S</sub> from the same FMEDA / reliability data as λ<sub>D</sub>; do not guess a safe fraction. Example: a comparator whose stuck-high failure is annunciated and shuts down safely contributes to λ<sub>S</sub>, not λ<sub>D</sub>.</p>'
+        },
+        datasheet: {
+            title: 'From a datasheet FMEDA (λ_S / λ_DD / λ_DU)',
+            body:
+                '<p>Component safety datasheets and safety manuals usually give per-part FIT rates already split into <strong>safe</strong>, <strong>dangerous-detected</strong> and <strong>dangerous-undetected</strong> — often once for <strong>permanent</strong> faults and once for <strong>transient</strong> faults. Map them to the inputs here:</p>' +
+                '<ul>' +
+                '<li><strong>λ<sub>D</sub> (dangerous, FIT)</strong> = λ<sub>DD</sub> + λ<sub>DU</sub></li>' +
+                '<li><strong>DC₁</strong> = λ<sub>DD</sub> / (λ<sub>DD</sub> + λ<sub>DU</sub>) — the diagnostic coverage the sheet implies</li>' +
+                '<li><strong>λ<sub>S</sub> (safe, FIT)</strong> = λ<sub>S</sub> (= λ<sub>SD</sub> + λ<sub>SU</sub> if the sheet splits safe)</li>' +
+                '<li><strong>DC₂</strong> = 1 − λ<sub>MPF,latent</sub> / λ<sub>DD</sub> when a latent-fault figure is given; otherwise leave 0</li>' +
+                '</ul>' +
+                '<p>Choose <em>Failure rate (FIT) + diagnostic coverage</em>, enter λ<sub>D</sub> and DC₁ (and DC₂), and put λ<sub>S</sub> in its field. The tool then reproduces λ<sub>DD</sub> = λ<sub>D</sub>·DC₁ and λ<sub>DU</sub> = λ<sub>D</sub>·(1−DC₁) exactly — the residual equals the datasheet λ<sub>DU</sub>, and SFF / SPFM match.</p>' +
+                '<p><strong>Permanent + transient.</strong> A failure mode here holds one rate, so use one of:</p>' +
+                '<ul>' +
+                '<li><strong>Preferred — two modes.</strong> Enter the part twice in the same function, e.g. "X (permanent)" and "X (transient)", each with its own λ<sub>D</sub> / DC₁ / λ<sub>S</sub>. Each keeps its own coverage and the metrics sum across the leaves.</li>' +
+                '<li><strong>Or sum into one mode.</strong> λ<sub>D</sub> and λ<sub>S</sub> add; DC₁ becomes the rate-weighted blend Σλ<sub>DD</sub> / Σλ<sub>D</sub>.</li>' +
+                '</ul>' +
+                '<p>How transient faults count toward SPFM / PMHF depends on your safety plan (ISO 26262 treats them separately from permanent random hardware failures). Keeping them as a separate mode lets you include or exclude them deliberately.</p>' +
+                '<p><strong>Worked example.</strong> Permanent λ<sub>S</sub> 900, λ<sub>DD</sub> 180, λ<sub>DU</sub> 20; transient λ<sub>S</sub> 0, λ<sub>DD</sub> 90, λ<sub>DU</sub> 10. As two modes → permanent: λ<sub>D</sub> 200, DC₁ 0.9, λ<sub>S</sub> 900; transient: λ<sub>D</sub> 100, DC₁ 0.9, λ<sub>S</sub> 0. Combined leaf totals: λ<sub>total</sub> 1200, λ<sub>DD</sub> 270, λ<sub>DU</sub> 30, λ<sub>S</sub> 900 → SFF = (900 + 270) / 1200 = 97.5 %.</p>' +
+                '<p><strong>If the sheet gives a base rate and a failure-mode distribution (FMD %)</strong> instead of per-mode rates: first compute each mode λ = base λ × FMD %, then split that into safe / DD / DU as above.</p>'
+        },
         ffi: {
             title: 'Freedom from Interference (FFI) and groups',
             body:
@@ -293,10 +341,10 @@ const CONFIG = {
                 '<p><strong>IEC 61508 split</strong> (all in FIT)</p>' +
                 '<ul>' +
                 '<li><strong>λ<sub>Total, Safety</sub></strong> — the sum of all failure rates considered. Here it is the sum of the <em>dangerous</em> rates only (see the note on safe failures below).</li>' +
-                '<li><strong>λ<sub>SD</sub> / λ<sub>SU</sub></strong> — safe detected / safe undetected. <strong>Always 0</strong> in this tool today — no safe-failure portion is modelled.</li>' +
+                '<li><strong>λ<sub>SD</sub> / λ<sub>SU</sub></strong> — safe detected / safe undetected. λ<sub>SD</sub> = 0 (no safe-detected split is modelled); the entered safe rate λ<sub>S</sub> sits in λ<sub>SU</sub>. Default 0 until you enter it.</li>' +
                 '<li><strong>λ<sub>DD</sub></strong> — dangerous detected = <code>λ<sub>D</sub> × DC<sub>1</sub></code>.</li>' +
                 '<li><strong>λ<sub>DU</sub></strong> — dangerous undetected = <code>λ<sub>D</sub> × (1 − DC<sub>1</sub>)</code>, i.e. the residual.</li>' +
-                '<li><strong>SFF</strong> — Safe Failure Fraction = <code>(Σλ<sub>S</sub> + Σλ<sub>DD</sub>) / Σλ<sub>Total</sub></code>. With λ<sub>S</sub> = 0 this reduces to <code>Σλ<sub>DD</sub> / Σλ<sub>D</sub></code> — the detected-dangerous fraction.</li>' +
+                '<li><strong>SFF</strong> — Safe Failure Fraction = <code>(Σλ<sub>S</sub> + Σλ<sub>DD</sub>) / Σλ<sub>Total</sub></code>. Enter a safe rate λ<sub>S</sub> on each mode for the true figure; with λ<sub>S</sub> = 0 it reduces to <code>Σλ<sub>DD</sub> / Σλ<sub>D</sub></code> — the detected-dangerous fraction (a conservative floor).</li>' +
                 '</ul>' +
                 '<p><strong>ISO 26262 terminology mapping</strong></p>' +
                 '<ul>' +
@@ -308,10 +356,10 @@ const CONFIG = {
                 '<li><strong>LFM</strong> — Latent-Fault Metric = <code>1 − Σλ<sub>MPF,latent</sub> / Σ(λ − λ<sub>SPF</sub> − λ<sub>RF</sub>)</code>.</li>' +
                 '</ul>' +
                 '<hr>' +
-                '<p><strong>About safe failures (read this).</strong> This tool currently models every entered rate as <em>dangerous</em> — there is no safe-failure portion (λ<sub>S</sub> = 0). Two consequences follow, and both are <strong>conservative</strong>:</p>' +
+                '<p><strong>About safe failures (read this).</strong> Each failure mode now carries a <strong>safe failure rate λ<sub>S</sub></strong> (default 0). When you leave it 0, every entered rate is treated as dangerous and the figures below are <strong>conservative</strong>:</p>' +
                 '<ul>' +
-                '<li><strong>λ<sub>Total, Safety</sub> is the sum of dangerous rates only.</strong> A full FMEDA that also captured the safe failures would report a larger total. Because λ<sub>SD</sub> and λ<sub>SU</sub> are forced to 0, they contribute nothing to the total here.</li>' +
-                '<li><strong>SFF is lower than it would otherwise be.</strong> Safe failures normally count toward the "safe" numerator of SFF; omitting them shrinks both the numerator and the denominator in a way that lowers SFF. So the SFF shown is a floor — the real figure, with safe failures credited, is at least this high.</li>' +
+                '<li><strong>λ<sub>Total, Safety</sub> = Σ(λ<sub>D</sub> + λ<sub>S</sub>).</strong> With λ<sub>S</sub> = 0 it is the sum of dangerous rates only; entering the safe portion raises it to the full element rate.</li>' +
+                '<li><strong>SFF rises with λ<sub>S</sub>.</strong> Safe failures count toward the safe numerator of SFF. With λ<sub>S</sub> = 0 the SFF shown is a floor — the real figure, with safe failures credited, is at least this high.</li>' +
                 '</ul>' +
                 '<p>The metrics are computed over the leaf failure modes; derived (top/mid) modes are roll-ups of those leaves and are not summed again. Treat every figure as the <em>achieved</em> metric, to be checked against your HARA / safety-goal target.</p>' +
                 '<hr>' +
