@@ -7,7 +7,7 @@
  *   · the top-event summary card (PFD, PFH, SIL, ASIL)
  *   · the warnings list (FFI, repeated events, dangling, cycles, …)
  *   · scenario picker (active scenario for the next recalc)
- *   · per-event breakdown (sorted by contribution to top)
+ *   · per-event breakdown (PFD plus Fussell–Vesely importance for basics)
  *   · global controls (Recalculate, Auto-arrange, Mission time)
  *
  * Public:
@@ -40,6 +40,7 @@ const controls = (() => {
     let _activeScenario = null;
     let _dirty         = true;
     let _viewMode      = 'technical';   // 'technical' | 'simplified'
+    let _standard      = 'ISO26262';    // 'ISO26262' | 'IEC61508' (FMEDA lens)
     let _lastFmedaRollup = null;        // remembered FMEDA rollup for re-render
     let _mode          = 'FTA';         // 'FTA' | 'ETA'
 
@@ -201,10 +202,21 @@ const controls = (() => {
         _renderBreakdown(_analysis);
     }
 
+    /* FMEDA results lens: 'ISO26262' | 'IEC61508'. Re-renders the residual
+       roll-up under the new standard's vocabulary and targets. Inputs are
+       untouched — only the output framing changes. */
+    function setStandard(std) {
+        _standard = (std === 'IEC61508') ? 'IEC61508' : 'ISO26262';
+        if (_mode === 'FMEDA' && _lastFmedaRollup) {
+            applyFmedaRollup(_lastFmedaRollup);
+        }
+    }
+
     /* ── Project change → repaint the static parts ───────────────── */
 
     function renderProject(project) {
         _project = project;
+        if (project && project.standard) _standard = project.standard;
         const mt = document.getElementById('ctrlMT');
         if (mt) mt.value = project.missionTime;
         _renderScenarios();
@@ -239,19 +251,36 @@ const controls = (() => {
             const fnNames = [...new Set(f.targets.map(t =>
                 fmt.escHtml(t.functionName) + ' <span class="cc-el">(' +
                 fmt.escHtml(t.elementName) + ')</span>'))].join(', ');
-            // Is the common cause itself mitigated? If so, note it as
-            // addressed (information retained) rather than a raw red flag.
+            // Three states, in order of strength:
+            //   1. addressed BY DESIGN — a Mitigation element (M_n) feeds the
+            //      cause (M → cause edge). Structural, preferred.
+            //   2. manually flagged — the engineer ticked the box below
+            //      (architectural independence/separation with no wired M).
+            //   3. open (⚠) — neither.
+            // The checkbox is ALWAYS shown (the manual / lazy path); it is
+            // documentation only and never touches the residual rate.
             const src = project.eventById(f.sourceId);
-            const mitigated = src && project.fmedaIsHandled(src);
+            const manual = !!(src && src.commonCauseMitigated);
+            const byM    = !!f.addressedByM;
+            const ok     = byM || manual;
+            const mList  = (f.mitigationIds || []).join(', ');
+            const mark   = ok ? '✓' : '⚠';
+            const statusLine = byM
+                ? `Addressed by mitigation <strong>${fmt.escHtml(mList)}</strong>${manual ? ' (also flagged)' : ''}. The mitigation adds its own failure to the chain; the residual rate is unchanged.`
+                : (manual
+                    ? 'Marked mitigated. Recorded for traceability; the residual rate is unchanged.'
+                    : 'To address: add a Mitigation (M) element and link its failure to this cause (M → cause), or eliminate the shared dependency / add independence and tick the box. (Or open the cause to add a diagnostic + reaction.)');
             html += `
-                <div class="cc-card ${mitigated ? 'cc-card-ok' : ''}">
-                    <div class="cc-src">${mitigated ? '✓' : '⚠'}
+                <div class="cc-card ${ok ? 'cc-card-ok' : ''}">
+                    <div class="cc-src">${mark}
                         <strong class="cc-link" data-cc-src="${f.sourceId}">${fmt.escHtml(f.sourceName)}</strong>
                         is a common cause across ${f.functionCount} functions</div>
                     <div class="cc-targets">Reaches: ${fnNames}</div>
-                    <div class="cc-fix">${mitigated
-                        ? 'Mitigated at the cause (diagnostic + reaction). Kept here for traceability.'
-                        : 'To address: open the cause and add a diagnostic + reaction mitigation, or eliminate the shared dependency.'}</div>
+                    <label class="cc-mit">
+                        <input type="checkbox" class="cc-mit-cb" data-cc-src="${f.sourceId}"
+                            ${manual ? 'checked' : ''}>
+                        Common cause mitigated (independence / separation / diagnostic)</label>
+                    <div class="cc-fix">${statusLine}</div>
                 </div>`;
         });
         el.innerHTML = html;
@@ -260,6 +289,19 @@ const controls = (() => {
         el.querySelectorAll('.cc-link').forEach(n => {
             n.addEventListener('click', () => {
                 if (cb.onEventClick) cb.onEventClick(n.getAttribute('data-cc-src'));
+            });
+        });
+        // Ticking the box records the mitigation decision on the cause and
+        // repaints (so the ✓/⚠ flips immediately). Documentation only — it
+        // does not touch the residual roll-up.
+        el.querySelectorAll('.cc-mit-cb').forEach(box => {
+            box.addEventListener('change', () => {
+                const srcId = box.getAttribute('data-cc-src');
+                if (cb.onCommonCauseToggle) cb.onCommonCauseToggle(srcId, box.checked);
+                else if (_project) {
+                    _project.updateEvent(srcId, { commonCauseMitigated: box.checked });
+                    _renderCommonCause(_project);
+                }
             });
         });
     }
@@ -438,9 +480,10 @@ const controls = (() => {
     }
     function _asilClass(a) {
         if (!a) return '';
-        if (a === 'ASIL D')   return 'lvl-4';
-        if (a === 'ASIL B/C') return 'lvl-3';
-        if (a === 'ASIL A')   return 'lvl-2';
+        if (a === 'ASIL D') return 'lvl-4';
+        if (a === 'ASIL C') return 'lvl-3';
+        if (a === 'ASIL B') return 'lvl-2';
+        if (a === 'ASIL A') return 'lvl-1';
         return 'lvl-0';
     }
 
@@ -573,7 +616,7 @@ const controls = (() => {
                       : ev.kind === 'basic' ? 'kind-basic'
                       : 'kind-int';
             const contrib = ev.contribution > 0
-                ? Math.min(100, ev.contribution * 100).toFixed(1) + '%'
+                ? (ev.contribution * 100).toFixed(1) + '%'
                 : '—';
             const val = simple ? fmt.pctStr(ev.pfd) : fmt.probStr(ev.pfd);
             // Hover label on the PFD value — tells the reader which
@@ -586,7 +629,7 @@ const controls = (() => {
                     <span class="ctrl-bd-name" title="${fmt.escHtml(ev.name)}">${fmt.escHtml(ev.name)}</span>
                     <span class="ctrl-bd-val" title="${valTitle}">${val}</span>
                     ${ev.kind === 'top' ? '' :
-                        `<span class="ctrl-bd-pct" title="Approx contribution to top PFD">${contrib}</span>`}
+                        `<span class="ctrl-bd-pct" title="Importance (Fussell–Vesely): the fractional drop in the top PFD if this basic event were perfectly reliable">${contrib}</span>`}
                 </div>`;
         });
         el.innerHTML = html;
@@ -610,34 +653,75 @@ const controls = (() => {
        leaf failure modes; λ_S = 0 (no safe-failure portion modelled). */
     function _fmedaMetricsHtml(metrics, simple) {
         const t   = metrics.total;
+        const iso = (_standard !== 'IEC61508');
         const fit = v => fmt.fitStr(v);
         const pct = v => (v == null) ? '—' : (Math.round(v * 1000) / 10) + '%';
         const row = (k, v) => `<div class="res-m-row"><span>${k}</span><strong>${v}</strong></div>`;
-        let h = `<div class="res-section">FMEDA metrics</div>
+        // PMHF ≈ single-point + residual dangerous rate (the ISO 26262 random-
+        // hardware target basis). PFH for the IEC lens ≈ the residual
+        // dangerous-undetected rate λ_DU.
+        const pmhf = (t.lambdaSPF + t.lambdaRF) * 1e-9;
+
+        let verdict;
+        if (iso) {
+            const achieved = fmt.asilFromMetrics(pmhf, t.spfm, t.lfm);
+            const tgt = (label, val, targets) =>
+                `${row(label, val)}<div class="res-m-tgt">target: ${targets}</div>`;
+            verdict = `<div class="res-section">ISO 26262 — hardware-architecture metrics</div>
+                <div class="res-card res-metrics-card">
+                    ${tgt('PMHF (single-point + residual)', fmt.perHourStr(pmhf),
+                          'ASIL D &lt; 1e-8 · ASIL C/B &lt; 1e-7 /h')}
+                    ${tgt('SPFM — single-point fault metric', pct(t.spfm),
+                          'D ≥ 99% · C ≥ 97% · B ≥ 90%')}
+                    ${tgt('LFM — latent-fault metric', pct(t.lfm),
+                          'D ≥ 90% · C ≥ 80% · B ≥ 60%')}
+                    <div class="res-m-verdict">${achieved === 'below ASIL B'
+                        ? 'Random-hardware metrics <strong>do not meet ASIL B</strong>, the lowest quantitative ASIL target — PMHF, SPFM or LFM is below the ASIL B threshold. (ASIL A, if required, is assigned qualitatively from the HARA, not from these metrics.)'
+                        : 'Meets the ISO 26262 random-hardware targets up to <strong>' + fmt.escHtml(achieved) + '</strong> — the highest ASIL whose PMHF, SPFM and LFM are <em>all</em> satisfied. This grades the random-hardware metrics only, not systematic capability or a HARA-assigned ASIL.'}</div>
+                </div>`;
+        } else {
+            const bandSil = fmt.silForPfh(t.lambdaDU * 1e-9);
+            const cap     = t.route1hSil;                       // null if no element SFF
+            const claim   = (cap == null) ? bandSil : fmt.silMin(bandSil, cap);
+            const capRow  = (cap == null)
+                ? `<div class="res-m-note">No element carries a computed SFF yet, so the Route 1<sub>H</sub> architectural cap is not evaluated. Add failure modes to your elements (and set each element's Type A/B and HFT) to apply it.</div>`
+                : `${row('Architectural cap (Route 1<sub>H</sub>)',
+                        '<strong>' + fmt.escHtml(cap) + '</strong>')}` +
+                  `<div class="res-m-tgt">limiting element: ${fmt.escHtml(t.route1hLimiter || '—')}</div>`;
+            const limited = (cap != null) && (fmt.silRank(cap) < fmt.silRank(bandSil));
+            verdict = `<div class="res-section">IEC 61508 — hardware integrity</div>
+                <div class="res-card res-metrics-card">
+                    ${row('PFH (residual dangerous-undetected)', fmt.perHourStr(t.lambdaDU * 1e-9))}
+                    ${row('<strong>Safe Failure Fraction (SFF)</strong>', '<strong>' + pct(t.sff) + '</strong>')}
+                    ${row('Integrity from PFH band', fmt.escHtml(bandSil))}
+                    ${capRow}
+                    ${row('<strong>Claimable SIL</strong>', '<strong>' + fmt.escHtml(claim) + '</strong>')}
+                    <div class="res-m-note">Route 1<sub>H</sub> (IEC 61508-2): each element's max SIL is capped by its SFF and hardware fault tolerance (HFT), per the Type A / Type B table. The claimable SIL is the lower of the PFH-band SIL and the architectural cap${limited ? ' — here the architecture limits it below the rate-based band' : ''}. Set each element's Type and HFT in its editor.</div>
+                </div>`;
+        }
+
+        let h = verdict + `<div class="res-section">λ breakdown</div>
             <div class="res-card res-metrics-card">
-                ${row('λ<sub>Total, Safety</sub>', fit(t.lambdaTotal))}
+                ${row('λ<sub>Total</sub>', fit(t.lambdaTotal))}
                 ${row('λ<sub>SD</sub> · λ<sub>SU</sub>', fit(t.lambdaSD) + ' · ' + fit(t.lambdaSU))}
                 ${row('λ<sub>DD</sub> — detected dangerous', fit(t.lambdaDD))}
                 ${row('λ<sub>DU</sub> — undetected dangerous', fit(t.lambdaDU))}
-                ${row('<strong>Safe Failure Fraction (SFF)</strong>', '<strong>' + pct(t.sff) + '</strong>')}
-                <div class="res-m-sub">ISO 26262 terminology</div>
-                ${row('λ<sub>SPF</sub> — single-point fault', fit(t.lambdaSPF))}
-                ${row('λ<sub>RF</sub> — residual fault', fit(t.lambdaRF))}
-                ${row('λ<sub>MPF,dp</sub> — multiple-point, detected', fit(t.lambdaMPFdp))}
-                ${row('λ<sub>MPF,latent</sub> — latent', fit(t.lambdaMPFlatent))}
-                ${row('Single-Point Fault Metric (SPFM)', pct(t.spfm))}
-                ${row('Latent-Fault Metric (LFM)', pct(t.lfm))}
-                <div class="res-m-note">λ<sub>S</sub> is the entered safe-failure rate (default 0). λ<sub>SD</sub> = 0 (no safe-detected split modelled); all of λ<sub>S</sub> sits in λ<sub>SU</sub>. SFF = (Σλ<sub>S</sub> + Σλ<sub>DD</sub>) / Σλ<sub>Total</sub>; with λ<sub>S</sub> = 0 it is a conservative floor. Computed over leaf failure modes — the achieved metric to check against your HARA target.</div>
+                ${iso ? row('λ<sub>SPF</sub> · λ<sub>RF</sub>', fit(t.lambdaSPF) + ' · ' + fit(t.lambdaRF)) +
+                        row('λ<sub>MPF,latent</sub>', fit(t.lambdaMPFlatent)) : ''}
+                <div class="res-m-note">Computed over leaf failure modes. λ<sub>S</sub> derives from the dangerous fraction (λ<sub>SD</sub> = 0; all λ<sub>S</sub> sits in λ<sub>SU</sub>). SFF = (Σλ<sub>S</sub> + Σλ<sub>DD</sub>) / Σλ<sub>Total</sub>.</div>
             </div>`;
         if (metrics.elements && metrics.elements.length > 1) {
             metrics.elements.slice()
                 .sort((a, b) => (b.lambdaTotal || 0) - (a.lambdaTotal || 0))
                 .forEach(e => {
+                    const tail = iso
+                        ? `SPFM ${pct(e.spfm)} · LFM ${pct(e.lfm)}`
+                        : `SFF ${pct(e.sff)} · Type ${fmt.escHtml(e.elementType || 'B')} · HFT ${e.hft || 0} · Route 1ₕ ${fmt.escHtml(e.route1hSil || '—')}`;
                     h += `<div class="res-card res-metrics-el">
                         <div class="res-fn">${fmt.escHtml(e.name)}
                             <span class="res-id">${fmt.escHtml(e.id || '')}</span>
                             ${e.level ? `<span class="res-lvl">${fmt.escHtml(e.level)}</span>` : ''}</div>
-                        <div class="res-pfh">λ ${fit(e.lambdaTotal)} FIT · SFF ${pct(e.sff)} · SPFM ${pct(e.spfm)} · LFM ${pct(e.lfm)}</div>
+                        <div class="res-pfh">λ ${fit(e.lambdaTotal)} FIT · ${tail}</div>
                     </div>`;
                 });
         }
@@ -658,24 +742,37 @@ const controls = (() => {
             return;
         }
         const simple = (_viewMode === 'simplified');
+        const iso    = (_standard !== 'IEC61508');   // ISO 26262 is the default lens
         const toPfh  = fit => fit * 1e-9;
         const fitStr = v => fmt.fitStr(v);
 
-        // Band helpers — single source of truth (fmt.* == FTA analyzer).
+        // Single chip for the ACTIVE standard only. The two scales are never
+        // shown as a pair, so "SIL 4 / ASIL D" can never appear together and be
+        // misread as an equivalence — an ASIL D element does not satisfy SIL 4.
         const bandChips = (pfh) => {
-            const sil  = fmt.silForPfh(pfh);
-            const asil = fmt.asilForPfh(pfh);
-            const silLbl  = simple ? (CONFIG.simpleLabels.sil[sil]   || sil)  : sil;
-            const asilLbl = simple ? (CONFIG.simpleLabels.asil[asil] || asil) : asil;
-            return `<span class="ctrl-chip ctrl-chip-sil ${_silClass(sil)}">${fmt.escHtml(silLbl)}</span>
-                    <span class="ctrl-chip ctrl-chip-asil ${_asilClass(asil)}">${fmt.escHtml(asilLbl)}</span>`;
+            if (iso) {
+                const asil = fmt.asilForPfh(pfh);
+                const lbl  = simple ? (CONFIG.simpleLabels.asil[asil] || asil) : asil;
+                const info = (asil === 'ASIL A')
+                    ? ' title="Informative: ISO 26262 sets no quantitative PMHF target for ASIL A — it is assigned qualitatively from the HARA, not from this rate."'
+                    : (asil === 'ASIL C')
+                    ? ' title="ASIL B and C share the 1e-7/h PMHF target; the SPFM/LFM metrics distinguish them."'
+                    : '';
+                const mark = (asil === 'ASIL A') ? '*' : '';
+                return `<span class="ctrl-chip ctrl-chip-asil ${_asilClass(asil)}"${info}>${fmt.escHtml(lbl)}${mark}</span>`;
+            }
+            const sil = fmt.silForPfh(pfh);
+            const lbl = simple ? (CONFIG.simpleLabels.sil[sil] || sil) : sil;
+            return `<span class="ctrl-chip ctrl-chip-sil ${_silClass(sil)}">${fmt.escHtml(lbl)}</span>`;
         };
-        // QM remark when neither standard grants an integrity claim.
+        // No-claim remark, phrased in the active standard's vocabulary.
         const qmRemark = (pfh) => {
-            const noClaim = fmt.silForPfh(pfh) === 'No SIL' && fmt.asilForPfh(pfh) === 'QM';
-            return noClaim
-                ? `<div class="res-qm">Quality-managed (QM) — no integrity claim at this rate.</div>`
-                : '';
+            const noClaim = iso ? (fmt.asilForPfh(pfh) === 'QM')
+                                : (fmt.silForPfh(pfh) === 'No SIL');
+            if (!noClaim) return '';
+            return iso
+                ? `<div class="res-qm">QM — no ASIL rate target met at this rate.</div>`
+                : `<div class="res-qm">No SIL — no integrity claim at this rate.</div>`;
         };
 
         let html = '';
@@ -767,7 +864,7 @@ const controls = (() => {
     return {
         init,
         renderProject, applyAnalysis, clearAnalysis,
-        markDirty, setActiveScenario, setViewMode, setMode,
+        markDirty, setActiveScenario, setViewMode, setStandard, setMode,
         setActiveNet, applyFmedaRollup
     };
 })();

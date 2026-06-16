@@ -56,6 +56,11 @@ class Project {
     constructor(name = '') {
         this.name        = name;
         this.missionTime = CONFIG.defaultMissionTime;
+        /* FMEDA results lens — which standard's vocabulary and targets the
+           results panel reports under: 'ISO26262' (default) or 'IEC61508'.
+           Per-project (a file remembers its domain) and persisted. Inputs are
+           identical either way — only the output framing differs. */
+        this.standard    = 'ISO26262';
         /* Top-level mode. The project carries TWO fully independent
            sub-models — one for FTA, one for ETA — and the toggle simply
            chooses which one is live. They never share data; FTA keeps a
@@ -78,14 +83,23 @@ class Project {
          top → TAL (top architecture level)
          mid → MAL (mid  architecture level)
          low → LL  (low-level element)
+         (low + mitigation) → M  (a Mitigation element — see below)
        Functions (any level) → FN.  FTA/ETA generic groups keep 'grp'.
+       A Mitigation element is an ordinary LOW-level architecture element
+       (it carries its own functions and failure modes, and its own failures
+       roll up exactly like any other element's) distinguished only by the
+       'M' prefix, its styling, and its role in the common-cause panel: an
+       M→failure failure-net edge marks that failure's common-cause finding
+       as addressed. The mitigation never subtracts a rate — it adds its own
+       failure into the chain like any cause (see fmedaPropagatedResidual).
        Note: the id is a STABLE key — references (parentId, net edges, gate
        maps) and external traceability depend on it, so re-classifying an
        element's level later does NOT rewrite its id; the prefix reflects the
        level the element had when it was created. Failure-mode ids (FM_n) are
        assigned in addEvent. */
-    static _groupIdPrefix(kind, level) {
+    static _groupIdPrefix(kind, level, mitigation) {
         if (kind === 'element') {
+            if (mitigation)      return 'M';
             if (level === 'top') return 'TAL';
             if (level === 'mid') return 'MAL';
             if (level === 'low') return 'LL';
@@ -141,6 +155,13 @@ class Project {
         return m;
     }
 
+    /* FMEDA results lens: 'ISO26262' | 'IEC61508'. Output framing only —
+       inputs and the engine are identical either way. */
+    setStandard(s) {
+        this.standard = (s === 'IEC61508') ? 'IEC61508' : 'ISO26262';
+        return this.standard;
+    }
+
     /* ── Lookups ──────────────────────────────────────────────────── */
 
     eventById(id)    { return this.events.find(e => e.id === id) || null; }
@@ -188,11 +209,16 @@ class Project {
     /* ── Group CRUD ───────────────────────────────────────────────── */
 
     addGroup({ name, color, description, parentId = null,
-               kind = 'group', level = null, x = 0, y = 0 }) {
+               kind = 'group', level = null, mitigation = false,
+               elementType = null, hft = null, x = 0, y = 0 }) {
+        // A Mitigation element is a low-level architecture element with the
+        // 'M' id prefix. Normalise: mitigation ⇒ element, low level.
+        mitigation = !!mitigation && kind === 'element';
+        if (mitigation) level = 'low';
         const col = color ||
             CONFIG.groupColors[this.groups.length % CONFIG.groupColors.length];
         const gr = {
-            id:          fmt.uid(Project._groupIdPrefix(kind, level)),
+            id:          fmt.uid(Project._groupIdPrefix(kind, level, mitigation)),
             name:        name || this._uniqueGroupName(),
             color:       col,
             description: description || '',
@@ -201,11 +227,21 @@ class Project {
             //   kind:  'element' | 'function' | 'group'
             //   parentId: a function's parent element (null otherwise)
             //   level: 'top' | 'mid' | 'low' swimlane (elements only)
+            //   mitigation: true ⇒ this element is a Mitigation (M_n). It is
+            //        an ordinary low element in every computation; the flag
+            //        only drives its id prefix, styling and common-cause role.
             //   x/y: saved position. Empty FMEDA elements/functions persist
             //        their spot here; populated ones derive it from children.
             parentId:    parentId,
             kind:        kind,
             level:       level,
+            mitigation:  mitigation,
+            // IEC 61508-2 Route 1ₕ inputs (elements only; ignored elsewhere).
+            //   elementType: 'A' (simple) | 'B' (complex). Default 'B' — the
+            //        conservative assumption for programmable / complex HW.
+            //   hft: hardware fault tolerance 0 | 1 | 2. Default 0.
+            elementType: kind === 'element' ? ((elementType === 'A') ? 'A' : 'B') : null,
+            hft:         kind === 'element' ? Math.max(0, Math.min(2, parseInt(hft, 10) || 0)) : null,
             x:           x || 0,
             y:           y || 0
         };
@@ -216,6 +252,20 @@ class Project {
     /* FMEDA helpers — null/empty in FTA & ETA. */
     elementGroups()   { return this.groups.filter(g => g.kind === 'element'); }
     functionGroups()  { return this.groups.filter(g => g.kind === 'function'); }
+    /* A Mitigation element is an ordinary element carrying the mitigation
+       flag. mitigationElements() lists them; isMitigationElement() tests a
+       group; isMitigationFailure() tests whether a failure mode lives inside
+       a Mitigation element (used by the common-cause "addressed by M" rule). */
+    mitigationElements() {
+        return this.groups.filter(g => g.kind === 'element' && g.mitigation);
+    }
+    isMitigationElement(g) { return !!(g && g.kind === 'element' && g.mitigation); }
+    isMitigationFailure(eventId) {
+        const e = this.eventById(eventId);
+        if (!e || !e.groupId) return false;
+        const el = this.elementOf(e.groupId);
+        return this.isMitigationElement(el);
+    }
     childGroups(parentId) {
         return this.groups.filter(g => g.parentId === parentId);
     }
@@ -319,10 +369,21 @@ class Project {
         return 'no-mitigation';
     }
 
-    /* Raw dangerous rate in FIT, before any diagnostic credit. */
+    /* Raw dangerous rate λ_D in FIT, before any diagnostic credit. */
     fmedaRawFit(e) {
         if (!e) return 0;
-        if (e.probMode === 'coverage') return Math.max(0, +e.failureRateRaw || 0);
+        if (e.probMode === 'coverage') {
+            // Primitives are the source of truth when present (v2.3.0+):
+            //   λ_D = base λ × FMD × dangerous-fraction.
+            // Older events carry no primitives — fall back to the stored λ_D.
+            if (e.lambdaBase != null) {
+                const base = Math.max(0, +e.lambdaBase || 0);
+                const fmd  = fmt.clamp(e.fmd, 0, 1, 1);
+                const dang = fmt.clamp(e.dangerousFraction, 0, 1, 1);
+                return base * fmd * dang;
+            }
+            return Math.max(0, +e.failureRateRaw || 0);
+        }
         if (e.probMode === 'rate')     return Math.max(0, +e.failureRate || 0);
         // direct: PFH given per hour -> FIT = PFH × 1e9; PFD has no rate,
         // approximate via equivalent constant rate over mission time.
@@ -348,6 +409,22 @@ class Project {
             return Math.max(rate, floor);
         }
         return 0;
+    }
+
+    /* Safe failure rate λ_S in FIT. Derived from the primitives when present
+       (λ_S = base λ × FMD × (1 − dangerous-fraction)); older events fall back
+       to the stored λ_S mirror. Only meaningful in coverage mode — direct/rate
+       modes carry no safe/dangerous split (λ_S = 0). */
+    fmedaSafeFit(e) {
+        if (!e) return 0;
+        if (e.probMode !== 'coverage') return 0;
+        if (e.lambdaBase != null) {
+            const base = Math.max(0, +e.lambdaBase || 0);
+            const fmd  = fmt.clamp(e.fmd, 0, 1, 1);
+            const dang = fmt.clamp(e.dangerousFraction, 0, 1, 1);
+            return base * fmd * (1 - dang);
+        }
+        return Math.max(0, +e.failureRateSafe || 0);
     }
 
     /* LOCAL residual: dangerous-undetected rate in FIT from this failure's
@@ -389,62 +466,75 @@ class Project {
         return lvl === 'top' || lvl === 'mid';
     }
 
-    /* PROPAGATED RAW (FIT) — the dangerous rate flowing INTO a failure mode
-       before this node's own diagnostic credit. For a leaf it is the mode's
-       own raw FIT; for a derived mode it is the OR/AND combination of the
-       RAW propagated rates of its causes. Used to express the diagnostic
-       coverage a derived mode achieves (raw → residual reduction). */
+    /* PROPAGATED RAW (FIT) — the dangerous rate flowing through a failure mode
+       before this node's own diagnostic credit, under the ADDITIVE model:
+
+           propagatedRaw = ownRaw + combine(incoming propagatedRaw, gate)
+
+       · ownRaw is the mode's OWN typed raw rate (fmedaRawFit) for a LEAF
+         (low-level, incl. Mitigation elements), and 0 for a DERIVED top/mid
+         mode (those carry no own rate — they are pure roll-ups).
+       · incoming are the failure-net causes (cause → effect). A leaf with no
+         incoming reduces to its own raw (unchanged from earlier behaviour);
+         a leaf WITH incoming (e.g. an LL fed by another LL or by an M) now
+         ADDS the incoming on top of its own — composition is edge-driven, not
+         level-gated.
+       Cycle-guarded across ALL nodes (an LL→LL loop is now possible): a node
+       reached again contributes its own raw only and the cycle is reported. */
     fmedaPropagatedRaw(eventId, _stack) {
         const e = this.eventById(eventId);
         if (!e) return 0;
-        if (!this.fmedaIsDerived(eventId)) return this.fmedaRawFit(e);   // leaf
-        _stack = _stack || new Set();
-        if (_stack.has(eventId)) { this._failCycleSeen = true; return 0; }
+        const own = this.fmedaIsDerived(eventId) ? 0 : this.fmedaRawFit(e);
         const incoming = this.failIncoming(eventId);
-        if (!incoming.length) return 0;                 // derived, no causes yet
+        if (!incoming.length) return own;
+        _stack = _stack || new Set();
+        if (_stack.has(eventId)) { this._failCycleSeen = true; return own; }
         _stack.add(eventId);
         const srcRaw = incoming.map(ed => this.fmedaPropagatedRaw(ed.from, _stack));
         _stack.delete(eventId);
-        return this._combineFit(srcRaw, this.failGateOf(eventId),
+        return own + this._combineFit(srcRaw, this.failGateOf(eventId),
                                 e.missionTimeOverride || this.missionTime || 1);
     }
 
     /* PROPAGATED residual (FIT) — the value actually used for a failure once
-       the failure net is taken into account.
+       the failure net is taken into account, under the ADDITIVE model:
 
-       · A LEAF (low-level) failure uses its OWN local residual (its typed
-         rate after its own diagnostic credit). Incoming edges to a leaf are
-         ignored — the leaf is, by definition, where a rate is entered.
-       · A DERIVED (top/mid-level) failure ignores any typed value and is
-         computed from its source failures' propagated residuals, combined
-         by the target's gate:
+           propagatedResidual = ownResidual + combine(incoming residuals, gate)
+
+       · ownResidual is the mode's OWN local residual (its typed rate after its
+         own diagnostic credit, fmedaResidualFit) for a LEAF, and 0 for a
+         DERIVED top/mid mode.
+       · incoming residuals are the causes' propagated residuals, combined by
+         the target's gate:
              OR  → rates sum (any cause defeats it; first-order)
              AND → all causes needed; combine in probability space over the
                    mission time, then convert back to an equivalent rate.
-         A derived failure carries NO diagnostic credit of its own — its
-         reduction comes entirely from the mitigations on the low-level
-         causes that feed it (which are already baked into the propagated
-         residuals). The credit it shows is COMPUTED, see fmedaComputedDC.
-       Cycle-guarded: a failure currently being evaluated contributes 0 if
-       reached again, and the cycle is reported via fmedaPropagationCycle(). */
+       A leaf with NO incoming returns its own residual exactly as before
+       (so files/demos that never feed an LL are bit-for-bit unchanged). A
+       leaf WITH incoming ADDS the incoming on top — this is how the entered
+       number "sits on top of what's already flowing in". A DERIVED mode has
+       own = 0, so it remains the pure combination of its causes, identical to
+       earlier behaviour. The diagnostic credit a derived mode shows is
+       COMPUTED, see fmedaComputedDC.
+       Cycle-guarded across ALL nodes: a node reached again contributes its
+       own residual only, and the cycle is reported via fmedaPropagationCycle(). */
     fmedaPropagatedResidual(eventId, _stack) {
         const e = this.eventById(eventId);
         if (!e) return 0;
-        if (!this.fmedaIsDerived(eventId)) return this.fmedaResidualFit(e);  // leaf
-        _stack = _stack || new Set();
-        if (_stack.has(eventId)) {           // cycle — break it
-            this._failCycleSeen = true;
-            return 0;
-        }
+        const own = this.fmedaIsDerived(eventId) ? 0 : this.fmedaResidualFit(e);
         const incoming = this.failIncoming(eventId);
-        if (!incoming.length) return 0;      // derived but no causes wired yet
-
+        if (!incoming.length) return own;
+        _stack = _stack || new Set();
+        if (_stack.has(eventId)) {           // cycle — break it, keep own
+            this._failCycleSeen = true;
+            return own;
+        }
         _stack.add(eventId);
         const srcRates = incoming.map(ed =>
             this.fmedaPropagatedResidual(ed.from, _stack));
         _stack.delete(eventId);
 
-        return this._combineFit(srcRates, this.failGateOf(eventId),
+        return own + this._combineFit(srcRates, this.failGateOf(eventId),
                                 e.missionTimeOverride || this.missionTime || 1);
     }
 
@@ -507,9 +597,13 @@ class Project {
             const fn = this.groupById(e.groupId);
             if (!fn || fn.kind !== 'function') return;
             const derived = this.fmedaIsDerived(e.id);
-            // Effective raw: leaf → its own typed raw; derived → the raw rate
-            // that propagates in (so "raw vs residual" reads sensibly).
-            const raw = derived ? this.fmedaPropagatedRaw(e.id) : this.fmedaRawFit(e);
+            // Effective raw under the additive model: the raw rate that
+            // PROPAGATES through the mode (own + incoming). For a leaf with no
+            // incoming this equals its own typed raw (unchanged); for a leaf
+            // fed by another failure (LL←LL, M→LL) or a derived mode it folds
+            // the incoming in, so "raw vs residual" stays consistent (raw ≥
+            // residual) instead of a leaf showing residual > raw.
+            const raw = this.fmedaPropagatedRaw(e.id);
             const res = this.fmedaPropagatedResidual(e.id);
             const handled = derived
                 ? this.fmedaComputedDC(e.id) > 0           // derived: handled by upstream
@@ -596,7 +690,7 @@ class Project {
             const fn = this.groupById(e.groupId);
             if (!fn || fn.kind !== 'function') return;
             const lamD = this.fmedaRawFit(e);                  // dangerous rate
-            const lamS = Math.max(0, +e.failureRateSafe || 0); // safe rate λ_S
+            const lamS = this.fmedaSafeFit(e);                 // safe rate λ_S (derived)
             if (!(lamD > 0) && !(lamS > 0)) return;            // nothing to count
             const dc1 = fmt.clamp(e.diagnosticCoverage, 0, 1, 0);
             const dc2 = fmt.clamp(e.diagnosticCoverageLatent, 0, 1, 0);
@@ -621,13 +715,15 @@ class Project {
                 byEl.set(elId, Object.assign(blank(), {
                     id: el ? el.id : null,
                     name: el ? el.name : '—',
-                    level: el ? (el.level || null) : null
+                    level: el ? (el.level || null) : null,
+                    elementType: (el && el.elementType === 'A') ? 'A' : 'B',
+                    hft: el ? Math.max(0, Math.min(2, parseInt(el.hft, 10) || 0)) : 0
                 }));
             }
             const acc = byEl.get(elId);
             Object.keys(contrib).forEach(k => { acc[k] += contrib[k]; total[k] += contrib[k]; });
         });
-        const finalize = (a) => {
+        const finalize = (a, isElement) => {
             const rf = a.lambdaSPF + a.lambdaRF;
             // SFF = (safe + dangerous-detected) / total. With a real λ_S this
             // is no longer pinned to the detected-dangerous fraction.
@@ -636,10 +732,24 @@ class Project {
             a.spfm = a.lambdaTotal > 0 ? 1 - rf / a.lambdaTotal : null;
             const mpfBase = a.lambdaTotal - rf;
             a.lfm  = mpfBase > 0 ? 1 - a.lambdaMPFlatent / mpfBase : null;
+            // IEC 61508-2 Route 1ₕ architectural cap from this element's SFF,
+            // type and HFT (per-element only; the total is an aggregate).
+            if (isElement) a.route1hSil = fmt.route1hMaxSil(a.elementType, a.sff, a.hft);
             return a;
         };
-        finalize(total);
-        const elements = Array.from(byEl.values()).map(finalize);
+        finalize(total, false);
+        const elements = Array.from(byEl.values()).map(a => finalize(a, true));
+        // System architectural cap = the most limiting element's Route 1ₕ SIL
+        // (a safety function is no better than its weakest constrained element).
+        let cap = null, limiter = null;
+        elements.forEach(e => {
+            if (e.route1hSil == null || e.route1hSil === '—') return;
+            if (cap == null || fmt.silRank(e.route1hSil) < fmt.silRank(cap)) {
+                cap = e.route1hSil; limiter = e.name;
+            }
+        });
+        total.route1hSil     = cap;       // null when no element has a computed SFF
+        total.route1hLimiter = limiter;
         return { total, elements };
     }
 
@@ -814,7 +924,19 @@ class Project {
        Direction makes the statement sensible: it is the cause that defeats
        multiple functions, never the effect. The edge arrow (cause → effect)
        encodes this; the finding reads "<cause> is a common cause across
-       <function A>, <function B>". */
+       <function A>, <function B>".
+
+       Each finding also reports whether a MITIGATION addresses it. A
+       Mitigation element (M_n) addresses a common cause when one of its own
+       failure modes feeds the common cause directly (an  M → cause  edge in
+       the failure net): the mitigation sits upstream of the failure it
+       suppresses. This is QUALITATIVE — it flips the finding from open (⚠) to
+       addressed (✓) — and does NOT subtract any rate; the mitigation's own
+       failure already rides up the chain as a normal additive cause.
+       A Mitigation element is itself an ordinary cause for DETECTION: if one
+       shared M reaches two functions it is reported as a common cause like
+       any other (the "same mitigation everywhere" trap is surfaced, not
+       hidden). `addressedByM` / `mitigationIds` are advisory metadata only. */
     commonCauseFindings() {
         if (this.mode !== 'FMEDA') return [];
         const failEdges = this.netEdgesOf('fail');
@@ -852,11 +974,23 @@ class Project {
                         elementName:  el ? el.name : '—'
                     });
                 }));
+                // Mitigation: any failure-net edge whose source is a failure
+                // mode inside a Mitigation element and whose target is THIS
+                // common cause addresses the finding.
+                const mitigationIds = [];
+                this.failIncoming(causeId).forEach(ed => {
+                    if (!this.isMitigationFailure(ed.from)) return;
+                    const src = this.eventById(ed.from);
+                    const mEl = src && src.groupId ? this.elementOf(src.groupId) : null;
+                    if (mEl && mitigationIds.indexOf(mEl.id) === -1) mitigationIds.push(mEl.id);
+                });
                 findings.push({
                     sourceId:      causeId,
                     sourceName:    cause.name,
                     targets,
-                    functionCount: byFunction.size
+                    functionCount: byFunction.size,
+                    addressedByM:  mitigationIds.length > 0,
+                    mitigationIds: mitigationIds
                 });
             }
         });
@@ -887,6 +1021,9 @@ class Project {
             probability:        src.probability,
             failureRate:        src.failureRate,
             failureRateRaw:     src.failureRateRaw,
+            lambdaBase:         src.lambdaBase != null ? src.lambdaBase : null,
+            fmd:                src.fmd != null ? src.fmd : null,
+            dangerousFraction:  src.dangerousFraction != null ? src.dangerousFraction : null,
             diagnosticCoverage: src.diagnosticCoverage,
             diagnosticCoverageLatent: src.diagnosticCoverageLatent || 0,
             failureRateSafe:    src.failureRateSafe || 0,
@@ -928,6 +1065,15 @@ class Project {
             failureRate:         d.failureRate,
             missionTimeOverride: null,
             failureRateRaw:      d.failureRateRaw,
+            /* FMEDA authoring primitives — null until the failure mode is
+               authored through the editor (or supplied explicitly). While
+               null, fmedaRawFit/fmedaSafeFit read the legacy λ_D (failureRateRaw)
+               / λ_S (failureRateSafe), so quick-created or imported modes keep
+               their exact previous numbers. The editor populates them on Save:
+               λ_D = lambdaBase × fmd × dangerousFraction. */
+            lambdaBase:          null,
+            fmd:                 null,
+            dangerousFraction:   null,
             diagnosticCoverage:  d.diagnosticCoverage,
             /* DC₂ — latent-fault coverage (ISO 26262 LFM). Default 0. */
             diagnosticCoverageLatent: d.diagnosticCoverageLatent || 0,
@@ -944,6 +1090,15 @@ class Project {
                as "handled" (green) when it has BOTH a diagnostic coverage
                > 0 AND a written mitigation requirement here. */
             mitigation:          '',
+            /* Explicit "this common cause is mitigated" decision, set from the
+               common-cause panel. A common cause is often handled
+               architecturally — independence, separation, redundancy — which
+               carries no diagnostic coverage on the cause itself, so the
+               panel's ✓/⚠ must NOT be inferred from fmedaIsHandled (DC + text).
+               It reads this flag instead. The flag is documentation/traceability
+               only: it does NOT alter the residual rate (mitigating a common
+               cause by independence does not lower the single mode's λ). */
+            commonCauseMitigated: false,
             /* Safety target — meaningful only on the top event. A single
                value from CONFIG.targetCombined (e.g. 'ASIL A', 'SIL 2',
                'QM'). The previous design carried separate targetSIL and
@@ -1194,6 +1349,39 @@ class Project {
         return out;
     }
 
+    /* Events repeated WITHIN the cone of one root (final/top) event — i.e.
+       consumed by two or more feeders that are themselves reachable from the
+       root. Walks the feeder tree (gate inputs and link sources) from the
+       root, counting how many feeders in the cone consume each event. This is
+       the per-final independence check ETA needs: an initiating event or
+       barrier shared across DIFFERENT finals is fine (each final is computed
+       on its own), but a true repeat inside a single final's cone still
+       double-counts. FTA's single top makes the whole model one cone, so the
+       global repeatedEvents() above already covers it. */
+    repeatedEventsFor(rootId) {
+        const count   = new Map();
+        const visited = new Set();
+        const walk = (id) => {
+            const g = this.gateFeeding(id);
+            if (g) {
+                g.inputs.forEach(iid => {
+                    count.set(iid, (count.get(iid) || 0) + 1);
+                    if (!visited.has(iid)) { visited.add(iid); walk(iid); }
+                });
+                return;
+            }
+            const l = this.linkFeeding(id);
+            if (l) {
+                count.set(l.from, (count.get(l.from) || 0) + 1);
+                if (!visited.has(l.from)) { visited.add(l.from); walk(l.from); }
+            }
+        };
+        walk(rootId);
+        const out = [];
+        count.forEach((c, id) => { if (c >= 2) out.push(id); });
+        return out;
+    }
+
     /* ── Serialisation ────────────────────────────────────────────── */
 
     toJSON() {
@@ -1203,6 +1391,7 @@ class Project {
             version:     CONFIG.fileVersion,
             mode:        ['ETA','FMEDA'].includes(this.mode) ? this.mode : 'FTA',
             missionTime: this.missionTime,
+            standard:    this.standard === 'IEC61508' ? 'IEC61508' : 'ISO26262',
             fta:         Project._dumpModel(this._models.FTA),
             eta:         Project._dumpModel(this._models.ETA),
             fmeda:       Project._dumpModel(this._models.FMEDA)
@@ -1238,6 +1427,15 @@ class Project {
             kind:        ['element','function','group'].includes(g.kind)
                          ? g.kind : 'group',
             level:       ['top','mid','low'].includes(g.level) ? g.level : null,
+            // Mitigation flag (v6+). Absent in older files ⇒ false, so every
+            // legacy element loads as an ordinary element. Only meaningful on
+            // an element; a mitigation is always low-level.
+            mitigation:  !!g.mitigation && g.kind === 'element',
+            // Route 1ₕ inputs (v6.1+). Absent in older files ⇒ Type B / HFT 0
+            // (the conservative default), so a legacy element loads unchanged.
+            elementType: g.kind === 'element' ? (g.elementType === 'A' ? 'A' : 'B') : null,
+            hft:         g.kind === 'element'
+                         ? Math.max(0, Math.min(2, parseInt(g.hft, 10) || 0)) : null,
             x: +g.x || 0, y: +g.y || 0
         }));
 
@@ -1262,6 +1460,12 @@ class Project {
                 missionTimeOverride: e.missionTimeOverride == null ? null
                                      : _num(e.missionTimeOverride, null),
                 failureRateRaw:      _num(e.failureRateRaw,     d.failureRateRaw),
+                /* FMEDA primitives (v2.3.0). Absent in older files → null, so
+                   fmedaRawFit/fmedaSafeFit fall back to the stored λ_D/λ_S.
+                   The editor migrates an old event to primitives on Save. */
+                lambdaBase:          e.lambdaBase != null ? Math.max(0, +e.lambdaBase || 0) : null,
+                fmd:                 e.fmd != null ? fmt.clamp(e.fmd, 0, 1, 1) : null,
+                dangerousFraction:   e.dangerousFraction != null ? fmt.clamp(e.dangerousFraction, 0, 1, 1) : null,
                 diagnosticCoverage:  fmt.clamp(e.diagnosticCoverage, 0, 1,
                                                 d.diagnosticCoverage),
                 diagnosticCoverageLatent: fmt.clamp(e.diagnosticCoverageLatent, 0, 1,
@@ -1269,6 +1473,7 @@ class Project {
                 failureRateSafe:     _num(e.failureRateSafe, d.failureRateSafe || 0),
                 diagnosticEvidence:  e.diagnosticEvidence || '',
                 mitigation:          e.mitigation || '',
+                commonCauseMitigated: !!e.commonCauseMitigated,
                 target:              target
             };
         });
@@ -1352,6 +1557,8 @@ class Project {
         const p = new Project(obj.name || '');
         p.missionTime = fmt.posNum(obj.missionTime, CONFIG.defaultMissionTime) ||
                         CONFIG.defaultMissionTime;
+        // Results lens — older files (no `standard`) default to ISO 26262.
+        p.standard = (obj.standard === 'IEC61508') ? 'IEC61508' : 'ISO26262';
 
         if (v >= 4 && (obj.fta || obj.eta || obj.fmeda)) {
             // Current format: independent sub-models.

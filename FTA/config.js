@@ -13,15 +13,20 @@ const CONFIG = {
        and stamped into exported reports / saved projects. BUMP THIS ON
        EVERY ITERATION of development — patch for fixes, minor for new
        features, major for breaking changes. */
-    appVersion:  '2.2.0',
-    releaseDate: '2026-06-15',
+    appVersion:  '2.7.0',
+    releaseDate: '2026-06-16',
 
     /* JSON file-format version. v2 added direct links; v3 was an earlier
        (now removed) ETA experiment; v4 stores two fully independent
        sub-models — `fta` and `eta` — selected by `mode`. Older files load
        as FTA: their flat top-level arrays become the FTA sub-model and the
-       ETA sub-model starts empty. */
-    fileVersion: 5,
+       ETA sub-model starts empty. v6 adds the `mitigation` element flag
+       (Mitigation / M_n elements) and edge-driven additive composition (a
+       failure mode's residual = its own rate + whatever the failure net feeds
+       in, at any level). Both are backward-compatible: the flag is absent
+       (⇒ false) in older files, and a failure mode with no incoming edges
+       computes exactly as before. */
+    fileVersion: 6,
 
     /* Project-wide default mission time, in hours. Used by `rate` and
        `coverage` events that don't override it. 10 000h ≈ 1.14 years
@@ -36,20 +41,34 @@ const CONFIG = {
         probability:        0.001,      // direct value
         failureRate:        100,        // FIT (rate mode)
         failureRateRaw:     1000,       // FIT (coverage mode, before DC)
-        diagnosticCoverage: 0,          // 0–1 (coverage mode). Default 0: a
-                                        // fresh failure mode carries its FULL
-                                        // raw rate until a DC is entered — no
-                                        // unearned diagnostic credit.
+        /* ── FMEDA authoring primitives (the single source of truth for a
+           failure mode's rate, since v2.3.0). The engine derives λ_D, λ_S,
+           λ_DD and λ_DU from these — there is no separately-editable rate to
+           drift out of sync. A datasheet that gives λ_D/λ_S directly is
+           entered as base λ = λ_D + λ_S with the dangerous fraction set to
+           λ_D / (λ_D + λ_S) (the "from a datasheet" helper shows this). */
+        lambdaBase:         1000,       // FIT — base failure rate λ of the mode
+        fmd:                1,          // 0–1 — failure-mode distribution share
+                                        // (λ_mode = λ × FMD). 1 = the whole rate
+                                        // is this mode.
+        dangerousFraction:  1,          // 0–1 — dangerous share of λ_mode.
+                                        // λ_D = λ_mode × d, λ_S = λ_mode × (1−d).
+                                        // 1 = all dangerous (conservative), the
+                                        // previous default (λ_S = 0).
+        diagnosticCoverage: 0,          // 0–1 (DC₁). Default 0: a fresh failure
+                                        // mode carries its FULL dangerous rate
+                                        // until a DC is entered — no unearned
+                                        // diagnostic credit.
         diagnosticCoverageLatent: 0,    // 0–1 (DC₂). Coverage of the mechanism
                                         // that reveals a LATENT (multiple-point)
                                         // fault. Drives the ISO 26262 latent-
                                         // fault metric (λ_MPF,latent / LFM).
-        failureRateSafe:    0           // FIT. Safe failure rate λ_S of this
-                                        // mode (failures with no hazardous
-                                        // effect). Default 0: nothing is
-                                        // credited as safe until entered, so
-                                        // SFF stays a conservative floor. Feeds
-                                        // λ_total and the SFF/SPFM numerators.
+        failureRateSafe:    0           // FIT. DERIVED MIRROR of λ_S since
+                                        // v2.3.0 (= λ_mode × (1−dangerous)),
+                                        // written on save for backward file
+                                        // compatibility with ≤2.2.x builds. Not
+                                        // independently editable, so it can never
+                                        // disagree with the dangerous fraction.
     },
 
     /* FMEDA-specific defaults. A failure mode is most naturally entered as a
@@ -77,15 +96,71 @@ const CONFIG = {
         { sil: 'No SIL', max: Infinity }
     ],
 
-    /* ISO 26262-5:2018 informative PMHF targets. ASIL B and C share
-       the numeric PMHF target (10⁻⁷); the distinction lives in the
-       SPFM/LFM hardware metrics which v1 does not address. */
+    /* ASIL bands from the ISO 26262-5 PMHF reference targets — the *real*
+       numbers, no forced pairing with the SIL ladder. ASIL D ≤ 1e-8 /h
+       (10 FIT); ASIL C and ASIL B share ≤ 1e-7 /h (100 FIT) — PMHF alone does
+       not separate B from C (the SPFM/LFM metrics do), so a rate that meets
+       B's target also meets C's, and the highest band reachable from a rate is
+       reported. ASIL A is `informative`: ISO 26262 sets NO quantitative PMHF
+       target for ASIL A (it is assigned qualitatively from the HARA), so an
+       ASIL A reading here is not a rate threshold and the UI marks it `*`.
+
+       These bands are NEVER shown beside the SIL chip as a matched pair: the
+       results panel uses a single-standard lens (ISO 26262 OR IEC 61508), so
+       "SIL 4 / ASIL D" can never appear together and be misread as an
+       equivalence. An ASIL D element does not satisfy SIL 4 — SIL 4 sits above
+       anything ISO 26262 defines. Tested top-down: first band whose `max`
+       exceeds PFH wins. */
     asilBands: [
-        { asil: 'ASIL D',   max: 1e-8 },
-        { asil: 'ASIL B/C', max: 1e-7 },
-        { asil: 'ASIL A',   max: 1e-6 },
-        { asil: 'QM',       max: Infinity }
+        { asil: 'ASIL D', max: 1e-8 },
+        { asil: 'ASIL C', max: 1e-7 },
+        { asil: 'ASIL B', max: 1e-7 },   // same PMHF target as C
+        { asil: 'ASIL A', max: 1e-5, informative: true },
+        { asil: 'QM',     max: Infinity }
     ],
+
+    /* ISO 26262-5 hardware-architecture metric targets per ASIL. PMHF is the
+       random-hardware failure target (/h); SPFM and LFM are the single-point
+       and latent-fault coverage metrics (fractions). ASIL A has no quantitative
+       targets (qualitative from the HARA). Used by the ISO 26262 results lens
+       to report which ASIL the achieved metrics meet — it does NOT check
+       against a required ASIL the user typed (the tool explains the band, it
+       does not grade it). */
+    iso26262Targets: [
+        { asil: 'ASIL D', pmhf: 1e-8, spfm: 0.99, lfm: 0.90 },
+        { asil: 'ASIL C', pmhf: 1e-7, spfm: 0.97, lfm: 0.80 },
+        { asil: 'ASIL B', pmhf: 1e-7, spfm: 0.90, lfm: 0.60 }
+    ],
+
+    /* IEC 61508-2:2010 Route 1ₕ — architectural constraints. The maximum SIL
+       an element may claim is capped by its Safe Failure Fraction (SFF) and
+       its hardware fault tolerance (HFT), and the cap differs for Type A
+       (simple, well-characterised) vs Type B (complex) elements. The element's
+       claimable SIL is the LOWER of this architectural cap and the SIL its
+       PFH meets — a good failure rate cannot buy back a SIL the architecture
+       forbids.
+
+       SFF bands: < 60 %, 60–< 90 %, 90–< 99 %, ≥ 99 %.
+       HFT columns: 0, 1, 2 (HFT ≥ 2 uses the 2 column).
+       `cap` is the SIL integer (0 means "not allowed" — no SIL claimable).
+       Tables 2 (Type A) and 3 (Type B). */
+    route1h: {
+        sffBands: [
+            { label: '< 60 %',     min: 0.0,  max: 0.60 },
+            { label: '60–< 90 %',  min: 0.60, max: 0.90 },
+            { label: '90–< 99 %',  min: 0.90, max: 0.99 },
+            { label: '≥ 99 %',     min: 0.99, max: Infinity }
+        ],
+        // cap[typeRow][hft] — typeRow indexes the sffBands above, hft is 0..2.
+        A: [ [1, 2, 3],   // SFF < 60 %
+             [2, 3, 4],   // 60–< 90 %
+             [3, 4, 4],   // 90–< 99 %
+             [3, 4, 4] ], // ≥ 99 %
+        B: [ [0, 1, 2],   // SFF < 60 %  (HFT 0 → not allowed)
+             [1, 2, 3],   // 60–< 90 %
+             [2, 3, 4],   // 90–< 99 %
+             [3, 4, 4] ]  // ≥ 99 %
+    },
 
     /* Heatmap stops applied to event nodes by their effective PFD on
        a log scale. Anything ≤ minP is fully green; ≥ maxP fully red. */
@@ -167,7 +242,8 @@ const CONFIG = {
         },
         asil: {
             'ASIL D':   'Highest automotive integrity (ASIL D)',
-            'ASIL B/C': 'High automotive integrity (ASIL B/C)',
+            'ASIL C':   'High automotive integrity (ASIL C)',
+            'ASIL B':   'Medium automotive integrity (ASIL B)',
             'ASIL A':   'Basic automotive integrity (ASIL A)',
             'QM':       'Quality-managed only (QM)',
             '—':        '—'
@@ -240,44 +316,60 @@ const CONFIG = {
         fmedaInput: {
             title: 'Specifying an FMEDA failure mode',
             body:
-                '<p>An FMEDA failure mode is characterised by its <strong>dangerous failure rate</strong> and the <strong>diagnostic coverage</strong> that catches it. Pick the form that matches your source data — all four feed the same hardware metrics (residual λ<sub>DU</sub>, SFF, SPFM, LFM).</p>' +
-                '<p><strong>Failure rate (FIT) + diagnostic coverage</strong> — the natural FMEDA input. Enter the dangerous rate <code>λ<sub>D</sub></code> in FIT, the primary coverage <code>DC₁</code> (0–1) and, if a latent-fault check exists, <code>DC₂</code>. The residual that propagates is <code>λ<sub>DU</sub> = λ<sub>D</sub> × (1 − DC₁)</code>. Example: λ<sub>D</sub> = 120 FIT, DC₁ = 0.9 → residual 12 FIT.</p>' +
-                '<p><strong>Failure rate (FIT)</strong> — a dangerous rate with no diagnostic credit (DC₁ = 0): the full rate is undetected. Use when there is no safety mechanism.</p>' +
-                '<p><strong>Probability per hour (PFH)</strong> — the same dangerous rate expressed in /h. Conversion: <code>FIT = PFH × 10⁹</code> (e.g. 2×10⁻⁷ /h = 200 FIT).</p>' +
-                '<p><strong>Probability of failure (%)</strong> — a mission-time probability (PFD), for low-demand or probability-sourced data. It is converted to an equivalent FIT for roll-up: <code>λ ≈ (PFD / t)×10⁹</code>, floored at the IEC 61508 low-/high-demand band of the same SIL so a long mission time can\'t dilute a catastrophic PFD. Prefer a rate (FIT/PFH) in FMEDA where you have one.</p>' +
-                '<p><strong>Safe failure rate λ<sub>S</sub></strong> (separate field) — failures of this mode with no hazardous effect. It does not change the residual/PMHF, but it is needed for a realistic <strong>SFF</strong> and <strong>SPFM</strong>: <code>SFF = (Σλ<sub>S</sub> + Σλ<sub>DD</sub>) / Σλ<sub>total</sub></code>. Leave it 0 and SFF stays a conservative floor.</p>'
-        },
-        safeRate: {
-            title: 'Safe failure rate (λ_S)',
-            body:
-                '<p><strong>λ<sub>S</sub></strong> is the rate (FIT) of failures of this mode that have <em>no</em> hazardous effect — the safe portion of the part\'s failures. In a full FMEDA each (sub)element\'s rate splits into safe (λ<sub>S</sub>) and dangerous (λ<sub>D</sub>); the dangerous part then splits into detected/undetected by DC₁.</p>' +
-                '<p>It feeds two figures and nothing else:</p>' +
+                '<p>A failure mode is described by a few <strong>primitives</strong>; the tool derives everything else, so there is one source of truth and nothing to keep in sync:</p>' +
                 '<ul>' +
-                '<li><strong>SFF</strong> = (Σλ<sub>S</sub> + Σλ<sub>DD</sub>) / Σλ<sub>total</sub> — safe failures count in the numerator, so a realistic λ<sub>S</sub> lifts SFF off the detected-dangerous floor.</li>' +
-                '<li><strong>SPFM</strong> denominator (Σλ<sub>total</sub>) grows, so SPFM rises — safe failures are not single-point faults.</li>' +
+                '<li><strong>Base failure rate λ (FIT)</strong> — the mode rate from a datasheet or reliability prediction.</li>' +
+                '<li><strong>FMD (%)</strong> — this mode share of λ: <code>λ<sub>mode</sub> = λ × FMD</code>. 100% if λ is already this mode rate.</li>' +
+                '<li><strong>Dangerous fraction (%)</strong> — the part that can violate the safety goal: <code>λ<sub>D</sub> = λ<sub>mode</sub> × d</code>, <code>λ<sub>S</sub> = λ<sub>mode</sub> × (1 − d)</code>.</li>' +
+                '<li><strong>DC₁ (%)</strong> — diagnostic coverage of λ<sub>D</sub>: <code>λ<sub>DD</sub> = λ<sub>D</sub> × DC₁</code>, residual <code>λ<sub>DU</sub> = λ<sub>D</sub> × (1 − DC₁)</code>.</li>' +
+                '<li><strong>DC₂ (%)</strong> — latent-fault coverage (ISO 26262 LFM).</li>' +
                 '</ul>' +
-                '<p>It does <strong>not</strong> affect the residual dangerous-undetected rate (λ<sub>DU</sub>) or the PMHF / integrity band, which are dangerous-only.</p>' +
-                '<p><strong>Default 0</strong> (nothing credited as safe). Source λ<sub>S</sub> from the same FMEDA / reliability data as λ<sub>D</sub>; do not guess a safe fraction. Example: a comparator whose stuck-high failure is annunciated and shuts down safely contributes to λ<sub>S</sub>, not λ<sub>D</sub>.</p>'
+                '<p>From these the tool computes the IEC 61508 / ISO 26262 hardware metrics — <code>SFF = (Σλ<sub>S</sub> + Σλ<sub>DD</sub>) / Σλ<sub>total</sub></code>, the SPFM (single-point) and LFM (latent) metrics, the residual λ<sub>DU</sub> that propagates through the failure net, and the PFH → SIL / ASIL band. The live readout shows each derived quantity as you type.</p>' +
+                '<p>Worked example: λ = 200 FIT, FMD 100%, dangerous 60% → λ<sub>D</sub> = 120, λ<sub>S</sub> = 80; DC₁ 90% → λ<sub>DD</sub> = 108, residual λ<sub>DU</sub> = 12 FIT.</p>'
+        },
+        lambdaBase: {
+            title: 'Base failure rate (λ)',
+            body:
+                '<p>The mode total failure rate in <strong>FIT</strong> (1 FIT = 1 failure per 10⁹ h), before any split or coverage. Take it from a component safety datasheet, a reliability prediction (e.g. IEC 61709 / SN 29500 / MIL-HDBK-217), or field data.</p>' +
+                '<p>It is split by the FMD and the dangerous fraction into λ<sub>D</sub> and λ<sub>S</sub> — do not pre-split it here.</p>'
+        },
+        fmd: {
+            title: 'Failure-mode distribution (FMD %)',
+            body:
+                '<p>The share of the base rate attributable to <em>this</em> failure mode: <code>λ<sub>mode</sub> = λ × FMD</code>. A component usually fails in several modes (open, short, drift, stuck…) whose FMD percentages sum to 100% across its modes.</p>' +
+                '<p>Leave it <strong>100%</strong> when λ is already this single mode rate. Use the datasheet / standard FMD table when you enter one component as several modes.</p>'
+        },
+        dangerousFraction: {
+            title: 'Dangerous fraction',
+            body:
+                '<p>The portion of λ<sub>mode</sub> that can <strong>violate the safety goal</strong>: <code>λ<sub>D</sub> = λ<sub>mode</sub> × d</code>. The remainder is the <strong>safe</strong> rate <code>λ<sub>S</sub> = λ<sub>mode</sub> × (1 − d)</code> — failures with no hazardous effect.</p>' +
+                '<p>λ<sub>S</sub> is derived from this; there is no separate safe-rate field. A datasheet that gives λ<sub>S</sub> directly: enter base λ = λ<sub>D</sub> + λ<sub>S</sub> and set the dangerous fraction to λ<sub>D</sub> / (λ<sub>D</sub> + λ<sub>S</sub>).</p>' +
+                '<p>λ<sub>S</sub> does not change the residual / PMHF (dangerous-only), but it lifts <strong>SFF</strong> and <strong>SPFM</strong> off the conservative floor. <strong>100%</strong> (all dangerous) is the safe default when you have no safe-failure data.</p>'
+        },
+        latentCoverage: {
+            title: 'Latent-fault coverage (DC₂)',
+            body:
+                '<p>ISO 26262 latent / multiple-point fault coverage: the fraction of <em>detected</em> (multiple-point) faults whose latency is itself revealed — by a periodic test, monitoring, or a driver warning. It drives the <strong>latent-fault metric (LFM)</strong>, not the single-point residual.</p>' +
+                '<p>Leave <strong>0</strong> when there is no latent-fault check. Example: a periodic RAM test that reveals an otherwise-latent fault → DC₂ ≈ 60–90%.</p>'
         },
         datasheet: {
             title: 'From a datasheet FMEDA (λ_S / λ_DD / λ_DU)',
             body:
                 '<p>Component safety datasheets and safety manuals usually give per-part FIT rates already split into <strong>safe</strong>, <strong>dangerous-detected</strong> and <strong>dangerous-undetected</strong> — often once for <strong>permanent</strong> faults and once for <strong>transient</strong> faults. Map them to the inputs here:</p>' +
                 '<ul>' +
-                '<li><strong>λ<sub>D</sub> (dangerous, FIT)</strong> = λ<sub>DD</sub> + λ<sub>DU</sub></li>' +
+                '<li><strong>Base λ (FIT)</strong> = λ<sub>S</sub> + λ<sub>DD</sub> + λ<sub>DU</sub> (the part total)</li>' +
+                '<li><strong>Dangerous fraction</strong> = (λ<sub>DD</sub> + λ<sub>DU</sub>) / base λ — the rest is the safe rate λ<sub>S</sub></li>' +
                 '<li><strong>DC₁</strong> = λ<sub>DD</sub> / (λ<sub>DD</sub> + λ<sub>DU</sub>) — the diagnostic coverage the sheet implies</li>' +
-                '<li><strong>λ<sub>S</sub> (safe, FIT)</strong> = λ<sub>S</sub> (= λ<sub>SD</sub> + λ<sub>SU</sub> if the sheet splits safe)</li>' +
                 '<li><strong>DC₂</strong> = 1 − λ<sub>MPF,latent</sub> / λ<sub>DD</sub> when a latent-fault figure is given; otherwise leave 0</li>' +
                 '</ul>' +
-                '<p>Choose <em>Failure rate (FIT) + diagnostic coverage</em>, enter λ<sub>D</sub> and DC₁ (and DC₂), and put λ<sub>S</sub> in its field. The tool then reproduces λ<sub>DD</sub> = λ<sub>D</sub>·DC₁ and λ<sub>DU</sub> = λ<sub>D</sub>·(1−DC₁) exactly — the residual equals the datasheet λ<sub>DU</sub>, and SFF / SPFM match.</p>' +
-                '<p><strong>Permanent + transient.</strong> A failure mode here holds one rate, so use one of:</p>' +
+                '<p>Enter it with the primitives: <strong>base λ = λ<sub>D</sub> + λ<sub>S</sub></strong>, <strong>FMD = 100%</strong> (or the sheet FMD if you split a part into modes), <strong>dangerous fraction = λ<sub>D</sub> / (λ<sub>D</sub> + λ<sub>S</sub>)</strong>, <strong>DC₁ = λ<sub>DD</sub> / λ<sub>D</sub></strong>, and DC₂ if a latent figure is given. The tool reproduces λ<sub>DD</sub> = λ<sub>D</sub>·DC₁ and λ<sub>DU</sub> = λ<sub>D</sub>·(1−DC₁) exactly — the residual equals the datasheet λ<sub>DU</sub>, and SFF / SPFM match.</p>' +
+                '<p><strong>Permanent + transient.</strong> A failure mode here holds one base rate, so use one of:</p>' +
                 '<ul>' +
-                '<li><strong>Preferred — two modes.</strong> Enter the part twice in the same function, e.g. "X (permanent)" and "X (transient)", each with its own λ<sub>D</sub> / DC₁ / λ<sub>S</sub>. Each keeps its own coverage and the metrics sum across the leaves.</li>' +
-                '<li><strong>Or sum into one mode.</strong> λ<sub>D</sub> and λ<sub>S</sub> add; DC₁ becomes the rate-weighted blend Σλ<sub>DD</sub> / Σλ<sub>D</sub>.</li>' +
+                '<li><strong>Preferred — two modes.</strong> Enter the part twice in the same function, e.g. "X (permanent)" and "X (transient)", each with its own base λ / dangerous fraction / DC₁. Each keeps its own coverage and the metrics sum across the leaves.</li>' +
+                '<li><strong>Or sum into one mode.</strong> Set base λ = Σ(λ<sub>D</sub> + λ<sub>S</sub>), dangerous fraction = Σλ<sub>D</sub> / base λ, and DC₁ = the rate-weighted blend Σλ<sub>DD</sub> / Σλ<sub>D</sub>.</li>' +
                 '</ul>' +
                 '<p>How transient faults count toward SPFM / PMHF depends on your safety plan (ISO 26262 treats them separately from permanent random hardware failures). Keeping them as a separate mode lets you include or exclude them deliberately.</p>' +
-                '<p><strong>Worked example.</strong> Permanent λ<sub>S</sub> 900, λ<sub>DD</sub> 180, λ<sub>DU</sub> 20; transient λ<sub>S</sub> 0, λ<sub>DD</sub> 90, λ<sub>DU</sub> 10. As two modes → permanent: λ<sub>D</sub> 200, DC₁ 0.9, λ<sub>S</sub> 900; transient: λ<sub>D</sub> 100, DC₁ 0.9, λ<sub>S</sub> 0. Combined leaf totals: λ<sub>total</sub> 1200, λ<sub>DD</sub> 270, λ<sub>DU</sub> 30, λ<sub>S</sub> 900 → SFF = (900 + 270) / 1200 = 97.5 %.</p>' +
-                '<p><strong>If the sheet gives a base rate and a failure-mode distribution (FMD %)</strong> instead of per-mode rates: first compute each mode λ = base λ × FMD %, then split that into safe / DD / DU as above.</p>'
+                '<p><strong>Worked example.</strong> Permanent λ<sub>S</sub> 900, λ<sub>DD</sub> 180, λ<sub>DU</sub> 20; transient λ<sub>S</sub> 0, λ<sub>DD</sub> 90, λ<sub>DU</sub> 10. As two modes → permanent: base λ 1100, dangerous 18.18%, DC₁ 90%; transient: base λ 100, dangerous 100%, DC₁ 90%. Combined leaf totals: λ<sub>total</sub> 1200, λ<sub>DD</sub> 270, λ<sub>DU</sub> 30, λ<sub>S</sub> 900 → SFF = (900 + 270) / 1200 = 97.5 %.</p>'
         },
         ffi: {
             title: 'Freedom from Interference (FFI) and groups',
@@ -311,7 +403,9 @@ const CONFIG = {
             title: 'FMEDA — architecture elements & levels',
             body:
                 '<p><strong>Architecture elements</strong> are the building blocks of the FMEDA. Each sits in one of three swimlanes by level: <strong>top</strong> (the system), <strong>mid</strong> (boards, controllers), and <strong>low</strong> (supporting sub-elements).</p>' +
-                '<p>An element contains <em>functions</em>, and each function contains its <em>failure modes</em> — the box-in-box containment of the FMEDA. Inside a single level, elements are assumed to have freedom from interference; connections run across levels through the architecture net.</p>'
+                '<p>An element contains <em>functions</em>, and each function contains its <em>failure modes</em> — the box-in-box containment of the FMEDA. Top and mid failure modes are <em>derived</em>: their rate is composed bottom-up from the lower-level failure modes that feed them through the failure net.</p>' +
+                '<p>Composition is <strong>additive</strong> and edge-driven: a failure mode\'s residual is its own entered rate <em>plus</em> whatever the failure net feeds in. This holds at any level — link one low-level failure into another (LL → LL) and the second one composes too.</p>' +
+                '<p>A <strong>Mitigation (M)</strong> is a low-level element that mitigates a common cause. It carries its own functions and failure modes like any element. Link one of its failure modes into a common cause (M → cause) to mark that finding addressed — the mitigation adds its own failure to the chain, it never subtracts a rate.</p>'
         },
         fmedaFunction: {
             title: 'FMEDA — functions',
@@ -415,21 +509,28 @@ const CONFIG = {
             body:
                 '<p>The <strong>target</strong> is the maximum acceptable PFH for the top event — derived from the system\'s required SIL (IEC 61508) or ASIL (ISO 26262).</p>' +
                 '<p>FAS compares the computed PFH against this target on every Recalculate and shows whether the target is met (✓) or missed (✗).</p>' +
-                '<p><strong>PFH bands used:</strong></p>' +
+                '<p><strong>IEC 61508 — PFH bands (high/continuous demand):</strong></p>' +
                 '<ul>' +
-                '<li>SIL 4 / ASIL D — PFH &lt; 10⁻⁸ /h</li>' +
-                '<li>SIL 3 / ASIL C — PFH &lt; 10⁻⁷ /h</li>' +
-                '<li>SIL 2 / ASIL B — PFH &lt; 10⁻⁶ /h</li>' +
-                '<li>SIL 1 / ASIL A — PFH &lt; 10⁻⁵ /h</li>' +
+                '<li>SIL 4 — PFH &lt; 10⁻⁸ /h</li>' +
+                '<li>SIL 3 — PFH &lt; 10⁻⁷ /h</li>' +
+                '<li>SIL 2 — PFH &lt; 10⁻⁶ /h</li>' +
+                '<li>SIL 1 — PFH &lt; 10⁻⁵ /h</li>' +
                 '</ul>' +
-                '<p>ASIL B/C share PFH = 10⁻⁷ in ISO 26262-5:2018 informative tables. The distinction between B and C is carried by the hardware metrics (SPFM, LFM, PMHF) not by PFH alone — FAS uses the more lenient bound for B.</p>'
+                '<p><strong>ISO 26262 — PMHF targets:</strong></p>' +
+                '<ul>' +
+                '<li>ASIL D — PMHF &lt; 10⁻⁸ /h (10 FIT)</li>' +
+                '<li>ASIL C and ASIL B — PMHF &lt; 10⁻⁷ /h (100 FIT); the SPFM/LFM metrics distinguish B from C, not the rate</li>' +
+                '<li>ASIL A — no quantitative PMHF target (assigned qualitatively from the HARA)</li>' +
+                '</ul>' +
+                '<p>The two scales are <strong>separate</strong> and reported independently — there is no normative SIL↔ASIL mapping. The tool never shows them paired in one chip, because that invites a false equivalence: an ASIL D element does NOT satisfy SIL 4 (ASIL D\'s development rigor is generally equated with SIL 3, and SIL 4 sits above anything ISO 26262 defines).</p>'
         },
         viewMode: {
             title: 'View modes',
             body:
                 '<p><strong>Technical</strong> — engineering view. Probabilities in scientific notation (1.23 × 10⁻⁵), per-hour rates, SIL/ASIL codes. Use when working inside the safety team.</p>' +
                 '<p><strong>Simplified</strong> — stakeholder view. Probabilities as percentages over the mission time, SIL/ASIL replaced by plain-language integrity labels. Use when showing the diagram to project management, customers, or non-safety reviewers.</p>' +
-                '<p>Both views are recomputed from the same underlying numbers — switching modes never changes the analysis, only how it\'s displayed.</p>'
+                '<p>Both views are recomputed from the same underlying numbers — switching modes never changes the analysis, only how it\'s displayed.</p>' +
+                '<p>In <strong>FMEDA</strong> mode this toggle becomes the <strong>results standard</strong> selector — ISO 26262 (SPFM, LFM, PMHF → ASIL) or IEC 61508 (SFF, PFH → SIL). The inputs are identical; only the output framing and target tables change, and only one standard\'s scale is shown at a time, so the SIL and ASIL ladders are never paired.</p>'
         }
     }
 };

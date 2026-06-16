@@ -110,7 +110,10 @@ const catalog = (() => {
         { group: 'Architecture', help: 'fmedaArch', items: [
             { kind: 'fmeda-element',
               icon: '▣',  label: 'Architecture element',
-              hint: 'An architecture element. Choose its level (top / mid / low) in the editor.' }
+              hint: 'An architecture element. Choose its level (top / mid / low) in the editor.' },
+            { kind: 'fmeda-mitigation',
+              icon: '⛨',  label: 'Mitigation (M)',
+              hint: 'A low-level element that mitigates. Carries its own functions and failure modes; wire its failure to a common cause (M → cause) to mark that finding addressed. Adds its own failure rate — never subtracts.' }
         ]},
         { group: 'Function', help: 'fmedaFunction', items: [
             { kind: 'fmeda-function',

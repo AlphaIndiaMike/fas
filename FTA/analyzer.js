@@ -43,8 +43,11 @@
  *
  * Warnings emitted alongside the values:
  *   · FFI: AND/VOTING gate inputs trace back to the same group.
- *   · Repeated event: same event id appears as input to ≥ 2 gates
- *     (independence assumption broken; result optimistic).
+ *   · Repeated event: independence assumption broken (result optimistic).
+ *     FTA flags an event feeding ≥ 2 gates/links anywhere (one top event,
+ *     one cone). ETA flags only a repeat WITHIN a single final's cone, since
+ *     sharing the initiating event and barriers across finals is the normal
+ *     shape of an event tree, not a double-count.
  *   · Dangling: intermediate/top event with no feeder (no gate and no
  *     direct link) feeding it.
  *   · Missing inputs: gate has fewer than its required number of inputs.
@@ -58,6 +61,9 @@ const analyzer = (() => {
 
     function analyze(project, scenarioId) {
         const { ctx, events, t } = _core(project, scenarioId);
+        // FTA: one top event → the whole model is its cone, so the global
+        // repeated-event count is exactly the right independence check.
+        _pushRepeated(ctx, project, project.repeatedEvents());
         // FTA: a single top event is the verdict.
         const top = project.topEvent();
         const topAnalysis = top ? _summaryFor(top, ctx, events, true) : null;
@@ -77,8 +83,16 @@ const analyzer = (() => {
        ETA simply allows more than one final. */
     function analyzeETA(project, scenarioId) {
         const { ctx, events, t } = _core(project, scenarioId);
-        const finals = project.events
-            .filter(e => e.kind === 'top')
+        const finalEvents = project.events.filter(e => e.kind === 'top');
+        // ETA: the initiating event and barriers are shared across finals by
+        // design and each final is computed independently — so only a repeat
+        // WITHIN a single final's cone is a real double-count. Union the
+        // per-final findings; a global count would false-alarm on every tree.
+        const repeated = new Set();
+        finalEvents.forEach(fe =>
+            project.repeatedEventsFor(fe.id).forEach(id => repeated.add(id)));
+        _pushRepeated(ctx, project, Array.from(repeated));
+        const finals = finalEvents
             .map(ev => _summaryFor(ev, ctx, events, false))
             .sort((a, b) => (b.pfd || 0) - (a.pfd || 0));
         return {
@@ -121,17 +135,6 @@ const analyzer = (() => {
             };
         });
 
-        // Repeated-event warning.
-        project.repeatedEvents().forEach(id => {
-            ctx.warnings.push({
-                kind:     'repeated',
-                eventId:  id,
-                msg:      'Event "' + (project.eventById(id).name) +
-                          '" appears in multiple gates — independence ' +
-                          'assumption may not hold; result is optimistic.'
-            });
-        });
-
         // FFI warning for AND / VOTING.
         project.gates.forEach(g => {
             const shared = project.ffiSharedGroups(g.id);
@@ -150,6 +153,48 @@ const analyzer = (() => {
         });
 
         return { ctx, events, t };
+    }
+
+    /* Push the "repeated event" independence warning for a set of event ids.
+       What counts as "repeated" is mode-specific and decided by the caller:
+         · FTA — global: an event feeding two or more gates/links anywhere is
+           double-counted in the single top calculation (project.repeatedEvents).
+         · ETA — per-final cone: the initiating event and the barriers are
+           SHARED across finals by design, and each final is computed
+           independently, so a global count would false-alarm on every event
+           tree. The caller unions repeatedEventsFor(final) over the finals, so
+           only a genuine repeat WITHIN one final's cone is flagged. */
+    function _pushRepeated(ctx, project, ids) {
+        ids.forEach(id => {
+            const ev = project.eventById(id);
+            ctx.warnings.push({
+                kind:    'repeated',
+                eventId: id,
+                msg:     'Event "' + (ev ? ev.name : id) +
+                         '" feeds more than one place in the same result — ' +
+                         'independence assumption may not hold; result is optimistic.'
+            });
+        });
+    }
+
+    /* Top-event PFD recomputed with one extra event forced to a fixed value,
+       on top of the active scenario overrides. Reuses the per-event recursion
+       and override mechanism, so every gate type (AND/OR/VOTING/INHIBIT) is
+       handled exactly as in the live calculation. Used for Fussell–Vesely
+       importance. */
+    function _topPfdWithForced(ctx, forcedId, forcedVal) {
+        const top = ctx.project.topEvent();
+        if (!top) return null;
+        const ov = new Map(ctx.overrides);
+        ov.set(forcedId, _clip01(forcedVal));
+        const sub = {
+            project:  ctx.project,
+            t:        ctx.t,
+            overrides: ov,
+            cache:    new Map(),
+            warnings: []
+        };
+        return _computeEvent(top.id, sub, new Set()).pfd;
     }
 
     /* Build the result-summary object for one final/top event (PFD, PFH,
@@ -179,11 +224,21 @@ const analyzer = (() => {
         }
 
         if (withContribution) {
+            // Importance per basic event = Fussell–Vesely: the fractional drop
+            // in the top-event PFD when this basic event is made perfectly
+            // reliable (forced to 0). FV ∈ [0,1] and is correct for every gate
+            // type — unlike a raw PFD ÷ top-PFD ratio, which exceeds 100 % the
+            // moment an AND/VOTING/INHIBIT gate drives the top below its leaves.
+            // Defined for basic events (the inputs an importance ranking acts
+            // on); derived events stay at 0 and read "—".
             events.forEach(ev => {
-                if (ev.id === top.id) return;
-                if (showPfd && ev.pfd != null && showPfd > 0) {
-                    ev.contribution = ev.pfd / showPfd;
-                }
+                ev.contribution = 0;
+                if (ev.id === top.id || ev.kind !== 'basic') return;
+                if (!(showPfd > 0)) return;
+                const reduced = _topPfdWithForced(ctx, ev.id, 0);
+                if (reduced == null) return;
+                const fv = (showPfd - reduced) / showPfd;
+                ev.contribution = fv > 0 ? Math.min(1, fv) : 0;
             });
         }
 

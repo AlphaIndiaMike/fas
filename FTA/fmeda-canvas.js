@@ -17,8 +17,9 @@
  *       'arch' — element ↔ element
  *       'func' — function ↔ function
  *       'fail' — failure ↔ failure   (+ common-cause hubs highlighted)
- *   Inside a level there are no edges — freedom from interference is
- *   assumed; the nets connect across levels.
+ *   Failure-net edges may connect failures at the SAME level (LL → LL) as
+ *   well as across levels; composition follows those edges additively. A
+ *   Mitigation element (M_n) renders with a distinct teal "barrier" style.
  *
  * Public (called by canvas.js):
  *   fmedaCanvas.elements(project, activeNet, commonCause) -> cy element array
@@ -122,6 +123,7 @@ const fmedaCanvas = (() => {
                         label: el.id + '  ·  ' + el.name,
                         color: el.color,
                         level: el.level || '',
+                        mit:   el.mitigation ? 1 : 0,
                         netActive: activeNet === 'arch' ? 1 : 0
                     },
                     // Honour a saved position (dragged, or seeded on load);
@@ -369,6 +371,16 @@ const fmedaCanvas = (() => {
                 // Active-net element gets a stronger border.
                 selector: 'node[type="fmeda-element"][netActive=1]',
                 style: { 'border-width': 3 }
+            },
+            {
+                // Mitigation element (M_n): teal "barrier" treatment so it
+                // reads as a protective measure, not a failure container.
+                selector: 'node[type="fmeda-element"][mit=1]',
+                style: {
+                    'background-color': '#DCEFEA', 'background-opacity': 0.75,
+                    'border-color': '#1F8A7A', 'border-width': 2,
+                    'color': '#0E4F46'
+                }
             },
             {
                 selector: 'node[type="fmeda-function"]',

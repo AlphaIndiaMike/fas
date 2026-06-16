@@ -49,17 +49,19 @@
 <div class="intro" id="introScreen">
     <div class="intro-brand">Functional Analysis <span>Studio</span></div>
     <div class="intro-tag">
-        Fault tree analysis with live probability propagation.
-        Drop basic events, wire them through gates, set leaf probabilities —
-        and watch the failure rate flow from leaves to the top event.
-        SIL (IEC 61508) and ASIL (ISO 26262) derived in one click.
+        Model how a system can fail — and how safe it really is.
+        Build a fault tree (FTA), an event tree (ETA), or an FMEDA, and watch
+        failure rates roll up into SIL (IEC 61508) and ASIL (ISO 26262)
+        integrity levels in one click.
     </div>
     <div class="intro-rule">
-        <span><span class="rule-num">01 —</span> Add events from the Catalog (left)</span>
-        <span><span class="rule-num">02 —</span> Set basic-event probabilities (P, λ in FIT, or λ + diagnostic coverage)</span>
-        <span><span class="rule-num">03 —</span> Wire events through AND / OR / Voting / Inhibit gates</span>
-        <span><span class="rule-num">04 —</span> Group events to mark independence boundaries (FFI)</span>
-        <span><span class="rule-num">05 —</span> Press <strong>Recalculate</strong> to propagate up to the top event</span>
+        <span><span class="rule-num">01 —</span> Choose your analysis — FTA, ETA or FMEDA — and add pieces from the Catalog</span>
+        <span><span class="rule-num">02 —</span> Set the leaf failure rates / probabilities (and diagnostic coverage)</span>
+        <span><span class="rule-num">03 —</span> Press <strong>Recalculate</strong> to roll results up and read the integrity level</span>
+    </div>
+    <div class="intro-note">
+        New here? Press <strong>New Project</strong> and <strong>Load reference</strong>
+        for a worked example of any analysis — it opens untitled, ready to make your own.
     </div>
     <div class="intro-btns">
         <button class="btn btn-sec"     onclick="main.triggerUpload()">↑ Load Project</button>
@@ -91,6 +93,17 @@
                     Simplified
                 </button>
             </div>
+            <div class="standard-toggle" role="tablist" aria-label="Results standard"
+                 style="display:none">
+                <button class="standard-btn on" data-standard="ISO26262"
+                        title="Report FMEDA results in ISO 26262 terms: SPFM, LFM, PMHF, ASIL">
+                    ISO 26262
+                </button>
+                <button class="standard-btn" data-standard="IEC61508"
+                        title="Report FMEDA results in IEC 61508 terms: SFF, PFH, SIL">
+                    IEC 61508
+                </button>
+            </div>
             <span class="canvas-toolbar-spacer"></span>
             <span style="font-size:0.65rem;color:var(--text-dim)">
                 Click an event, gate or group to edit · Drag to rearrange
@@ -115,13 +128,14 @@
        4.  config.js                 — global CONFIG
        5.  fmt.js                    — utilities
        6.  modal.js                  — shared modal primitive
-       7.  fas.js                    — Project model + JSON I/O
-       8.  analyzer.js               — probability propagation
-       9.  canvas.js                 — Cytoscape integration
-       10. catalog.js                — left-pane buttons
-       11. controls.js               — right-pane analysis & report
-       12. dialogs.js                — every modal
-       13. main.js                   — orchestrator
+       7.  picklist.js               — shared searchable single/multi select
+       8.  fas.js                    — Project model + JSON I/O
+       9.  analyzer.js               — probability propagation
+       10. canvas.js                 — Cytoscape integration
+       11. catalog.js                — left-pane buttons
+       12. controls.js               — right-pane analysis & report
+       13. dialogs.js                — every modal
+       14. main.js                   — orchestrator
 ═══════════════════════════════════════════════════════════ -->
 <script src="lib/cytoscape.min.js"></script>
 <script src="lib/dagre.min.js"></script>
@@ -129,6 +143,7 @@
 <script src="config.js"></script>
 <script src="fmt.js"></script>
 <script src="modal.js"></script>
+<script src="picklist.js"></script>
 <script src="fas.js"></script>
 <script src="analyzer.js"></script>
 <script src="fmeda-canvas.js"></script>

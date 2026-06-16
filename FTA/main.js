@@ -42,7 +42,16 @@ const main = (() => {
             onGateClick:         id  => dialogs.openGateEdit(id, null),
             onNetChange:         net => { canvas.setActiveNet(net); },
             onAutoConnectFunctions: _autoConnectFunctions,
-            onAutoConnectFailures:  _autoConnectFailures
+            onAutoConnectFailures:  _autoConnectFailures,
+            // Recording a common-cause mitigation decision is documentation
+            // only — it must NOT clear the residual roll-up (the rate is
+            // unchanged), so it does not go through _modelChanged.
+            onCommonCauseToggle: (srcId, checked) => {
+                if (!project) return;
+                project.updateEvent(srcId, { commonCauseMitigated: checked });
+                _unsaved = true;
+                controls.renderProject(project);
+            }
         });
 
         dialogs.init({
@@ -159,6 +168,7 @@ const main = (() => {
             b.classList.toggle('on', b.getAttribute('data-appmode') === m));
         catalog.setMode(m);
         controls.setMode(m);
+        _syncToolbarToggles();
     }
 
     /* Stamp the tool version into the header. Sourced from CONFIG so the
@@ -171,6 +181,12 @@ const main = (() => {
     function _bindEvents() {
         document.getElementById('fileInput')
             .addEventListener('change', _handleUpload);
+
+        const pill = document.getElementById('projectNamePill');
+        if (pill) pill.addEventListener('click', e => {
+            e.stopPropagation();
+            _renameProject();
+        });
 
         const lT = document.getElementById('drawerCatalog');
         const rT = document.getElementById('drawerControls');
@@ -208,6 +224,11 @@ const main = (() => {
                 _setViewMode(m);
             });
         });
+        document.querySelectorAll('.standard-btn').forEach(b => {
+            b.addEventListener('click', () => {
+                _setStandard(b.getAttribute('data-standard'));
+            });
+        });
     }
 
     function _setViewMode(mode) {
@@ -217,6 +238,33 @@ const main = (() => {
         });
         canvas.setViewMode(viewMode);
         controls.setViewMode(viewMode);
+    }
+
+    /* FMEDA results lens. Stored on the project (a file remembers its domain)
+       and reflected in the toggle highlight. */
+    function _setStandard(std) {
+        const s = (std === 'IEC61508') ? 'IEC61508' : 'ISO26262';
+        if (project) project.setStandard(s);
+        document.querySelectorAll('.standard-btn').forEach(b => {
+            b.classList.toggle('on', b.getAttribute('data-standard') === s);
+        });
+        controls.setStandard(s);
+        _unsaved = true;
+        controls.markDirty();
+    }
+
+    /* Show the lens toggle in FMEDA, the Technical/Simplified toggle otherwise
+       (the standard lens is what the FMEDA results need; Technical/Simplified
+       adds little there). Called on every mode switch. */
+    function _syncToolbarToggles() {
+        const isFmeda = project && project.mode === 'FMEDA';
+        const vm = document.querySelector('.viewmode-toggle');
+        const st = document.querySelector('.standard-toggle');
+        if (vm) vm.style.display = isFmeda ? 'none' : '';
+        if (st) st.style.display = isFmeda ? '' : 'none';
+        const cur = (project && project.standard === 'IEC61508') ? 'IEC61508' : 'ISO26262';
+        document.querySelectorAll('.standard-btn').forEach(b =>
+            b.classList.toggle('on', b.getAttribute('data-standard') === cur));
     }
 
     /* ── Smart positioning of newly-created entities ──────────────── */
@@ -349,12 +397,29 @@ const main = (() => {
     function _updateHeaderName() {
         const el = document.getElementById('projectNamePill');
         if (!el) return;
-        if (project && project.name) {
-            el.textContent   = project.name;
+        if (project) {
+            // Always show the pill while a project is active. An untitled
+            // project (e.g. a freshly loaded reference) reads "Untitled" so
+            // the user can see there's a name to set — clicking it renames.
+            const named = project.name && project.name.trim();
+            el.textContent   = named ? project.name : 'Untitled — click to name';
+            el.classList.toggle('is-untitled', !named);
+            el.title         = 'Click to rename this project';
             el.style.display = '';
         } else {
             el.style.display = 'none';
         }
+    }
+
+    /* Rename the active project. Opens a tiny dialog; the name is the user's
+       to decide — references load untitled precisely so this is their call. */
+    function _renameProject() {
+        if (!project) return;
+        dialogs.openRename(project.name || '', (name) => {
+            project.name = (name || '').trim();
+            _updateHeaderName();
+            _unsaved = true;
+        });
     }
 
     /* ── catalog handlers ────────────────────────────────────────── */
@@ -386,6 +451,9 @@ const main = (() => {
             case 'fmeda-element':
                 _fmedaAddElement('low');
                 break;
+            case 'fmeda-mitigation':
+                _fmedaAddMitigation();
+                break;
             case 'fmeda-function':
                 _fmedaAddFunction();
                 break;
@@ -412,6 +480,15 @@ const main = (() => {
         dialogs.openGroupEdit(null, {
             kind: 'element', level: level,
             name: 'Element ' + (project.elementGroups().length + 1)
+        });
+    }
+
+    /* A Mitigation element — an ordinary low-level element flagged as a
+       mitigation (id prefix M). Same create path as an element. */
+    function _fmedaAddMitigation() {
+        dialogs.openGroupEdit(null, {
+            kind: 'element', level: 'low', mitigation: true,
+            name: 'Mitigation ' + (project.mitigationElements().length + 1)
         });
     }
 
@@ -692,18 +769,24 @@ const main = (() => {
         dialogs.openNewProject(_proceedNewProject, _proceedDemo);
     }
 
-    function _proceedDemo() {
+    function _proceedDemo(mode, variant) {
         fmt.resetUid();
+        const m = ['FTA', 'ETA', 'FMEDA'].includes(mode) ? mode : 'FMEDA';
         project = (typeof demo !== 'undefined' && demo.build)
-            ? demo.build() : new Project('Demo');
+            ? demo.build(m, variant) : new Project('');
         activeScenario = null;
         _lastAnalysis  = null;
-        _activate();
+        // References seed every node at the same default spot, so force one
+        // auto-arrange on load (otherwise FTA/ETA nodes stack on top of each
+        // other until the user presses Auto-arrange). A loaded user file keeps
+        // its saved positions — only the demo path forces this.
+        _activate(true);
     }
 
     function _proceedNewProject(opts) {
         fmt.resetUid();
         project = new Project(opts.name || '');
+        if (opts.mode && ['ETA', 'FMEDA'].includes(opts.mode)) project.setMode(opts.mode);
         project.missionTime = opts.missionTime;
         activeScenario = null;
         _lastAnalysis  = null;
@@ -750,7 +833,7 @@ const main = (() => {
         event.target.value = '';
     }
 
-    function _activate() {
+    function _activate(forceLayout) {
         _showStudio();
         _unsaved = false;   // freshly created or loaded — nothing unsaved yet
         canvas.setEditable(true);
@@ -768,7 +851,7 @@ const main = (() => {
         // source of truth in the DOM).
         _setViewMode(viewMode);
         const anyPositioned = project.events.some(e => e.x || e.y);
-        if (!anyPositioned && project.events.length > 0) {
+        if (forceLayout || (!anyPositioned && project.events.length > 0)) {
             setTimeout(() => { canvas.autoLayout(); }, 60);
         } else {
             setTimeout(() => { canvas.fit(); }, 60);

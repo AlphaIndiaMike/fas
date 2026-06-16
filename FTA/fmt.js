@@ -122,7 +122,7 @@ const fmt = (() => {
 
     /* SIL / ASIL band lookup from a PFH (per-hour) value. Single source of
        truth, aligned with CONFIG.silBands / asilBands (same bounds the FTA
-       analyzer uses). Returns the band code, e.g. 'SIL 2' / 'ASIL B/C'. */
+       analyzer uses). Returns the band code, e.g. 'SIL 2' / 'ASIL B'. */
     function silForPfh(pfh) {
         if (pfh == null || isNaN(pfh)) return '—';
         for (const b of CONFIG.silBands)  { if (pfh < b.max) return b.sil; }
@@ -132,6 +132,73 @@ const fmt = (() => {
         if (pfh == null || isNaN(pfh)) return '—';
         for (const b of CONFIG.asilBands) { if (pfh < b.max) return b.asil; }
         return 'QM';
+    }
+
+    /* Highest ASIL whose ISO 26262-5 hardware targets are ALL met by the
+       achieved metrics: PMHF < target (/h) AND SPFM ≥ target AND LFM ≥ target.
+       Returns the ASIL string, or 'below ASIL B' when even ASIL B is not met,
+       or '—' when the metrics are unavailable. ASIL A is qualitative (no
+       quantitative target) so it is never *granted* here — a result that beats
+       nothing quantitatively is reported as 'below ASIL B', leaving the ASIL A
+       assignment to the HARA. SPFM/LFM are ignored when null (not computed). */
+    function asilFromMetrics(pmhfPerH, spfm, lfm) {
+        if (pmhfPerH == null || isNaN(pmhfPerH)) return '—';
+        for (const t of CONFIG.iso26262Targets) {
+            const pmhfOk = pmhfPerH < t.pmhf;
+            const spfmOk = (spfm == null) || (spfm >= t.spfm);
+            const lfmOk  = (lfm  == null) || (lfm  >= t.lfm);
+            if (pmhfOk && spfmOk && lfmOk) return t.asil;
+        }
+        return 'below ASIL B';
+    }
+
+    /* The ISO 26262 target row for one ASIL (or null). */
+    function iso26262TargetFor(asil) {
+        return CONFIG.iso26262Targets.find(t => t.asil === asil) || null;
+    }
+
+    /* IEC 61508-2 Route 1ₕ architectural-constraint cap. Given an element
+       type ('A' | 'B'), its SFF (fraction) and its hardware fault tolerance
+       (HFT, 0..2), returns the maximum SIL the architecture permits as a
+       string: 'SIL 1'..'SIL 4', or 'not allowed' when even HFT 0 forbids a
+       claim (Type B, SFF < 60 %). Returns '—' when SFF is unavailable. */
+    function route1hMaxSil(type, sff, hft) {
+        if (sff == null || isNaN(sff)) return '—';
+        const tbl = CONFIG.route1h[(type === 'A') ? 'A' : 'B'];
+        const h   = Math.max(0, Math.min(2, parseInt(hft, 10) || 0));
+        let row = 0;
+        for (let i = 0; i < CONFIG.route1h.sffBands.length; i++) {
+            if (sff < CONFIG.route1h.sffBands[i].max) { row = i; break; }
+            row = i;
+        }
+        const cap = tbl[row][h];
+        return cap === 0 ? 'not allowed' : 'SIL ' + cap;
+    }
+
+    /* The SFF-band label for display ('< 60 %' … '≥ 99 %'), or '—'. */
+    function sffBandLabel(sff) {
+        if (sff == null || isNaN(sff)) return '—';
+        const b = CONFIG.route1h.sffBands.find(b => sff < b.max);
+        return b ? b.label : CONFIG.route1h.sffBands[CONFIG.route1h.sffBands.length - 1].label;
+    }
+
+    /* Numeric rank of a SIL string for comparison. 'not allowed' / 'No SIL'
+       rank 0; 'SIL n' ranks n; anything else (—) ranks -1 (unknown). */
+    function silRank(s) {
+        if (s == null) return -1;
+        if (s === 'not allowed' || s === 'No SIL') return 0;
+        const m = /SIL\s*(\d)/.exec(s);
+        return m ? parseInt(m[1], 10) : -1;
+    }
+
+    /* The more limiting (lower) of two SIL strings, ignoring unknowns ('—').
+       Used to combine the PFH-band SIL with the Route 1ₕ architectural cap:
+       the claimable SIL is the lower of the two. */
+    function silMin(a, b) {
+        const ra = silRank(a), rb = silRank(b);
+        if (ra < 0) return b;
+        if (rb < 0) return a;
+        return ra <= rb ? a : b;
     }
 
     /* Stored fraction → percent string for an EDITABLE input field.
@@ -230,6 +297,7 @@ const fmt = (() => {
         probStr, fitStr, perHourStr,
         pctStr, pctInputVal, intDot, inHoursStr,
         sciStr, oneInN,
-        pfhDualStr, silForPfh, asilForPfh
+        pfhDualStr, silForPfh, asilForPfh, asilFromMetrics, iso26262TargetFor,
+        route1hMaxSil, sffBandLabel, silRank, silMin
     };
 })();

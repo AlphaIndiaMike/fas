@@ -198,7 +198,7 @@ const dialogs = (() => {
         // derived body below.
         const ownerField = isFmeda
             ? _field(multiCreate ? 'Function(s)' : 'Function',
-                _pickList({ id: 'fGroup', items: _functionPickItems(p),
+                picklist.create({ id: 'fGroup', items: _functionPickItems(p),
                             selected: e.groupId, multi: multiCreate,
                             placeholder: 'Search functions…' }),
                 multiCreate
@@ -250,12 +250,12 @@ const dialogs = (() => {
                 // Multi-select: the body stays the editable leaf form for all
                 // chosen functions, so DON'T rebuild it on each toggle (that
                 // would discard values the user has typed). Just track picks.
-                _wirePickList('fGroup');
+                picklist.wire('fGroup');
                 _wireProbSection(p, e);
             } else {
                 // Single edit/create: re-pick the function → move the failure
                 // mode and rebuild the editable/derived body for the new level.
-                _wirePickList('fGroup', (val) => {
+                picklist.wire('fGroup', (val) => {
                     e.groupId = val || null;
                     const flex = document.getElementById('fmedaFlex');
                     if (flex) flex.innerHTML = _fmedaFlexHtml(p, e, existing);
@@ -294,23 +294,61 @@ const dialogs = (() => {
         const probInner = isDerived
             ? _derivedProbHtml(p, existing)
             : _probSectionHtml(p, e, 'fmedaInput');
-        // Safe failure rate λ_S — leaf modes only (a derived effect inherits
-        // from its causes). Sits OUTSIDE #fModeBody so it survives an
-        // input-choice re-render; read back by _readDraft via #fSafe.
-        const safeField = isDerived ? '' : _field(
-            'Safe failure rate, λ_S (FIT) ' + _help('safeRate'),
-            `<input class="dlg-inp" id="fSafe" type="number" min="0" step="any" value="${e.failureRateSafe != null ? e.failureRateSafe : 0}">`,
-            'Failures of this mode with no hazardous effect (the safe portion). ' +
-            'Counts toward SFF and SPFM but not the residual/PMHF. Example: a ' +
-            'sensor that fails to a detected out-of-range value, λ_S ≈ 3000 FIT. ' +
-            'Leave 0 if you have no safe-failure data — SFF then stays a ' +
-            'conservative floor.');
+        // λ_S is no longer entered as an absolute rate — it is DERIVED from the
+        // dangerous fraction inside the input block (λ_S = λ_mode × (1 − d)) and
+        // shown in the live readout. A datasheet that gives λ_S directly is
+        // entered via base λ = λ_D + λ_S and dangerous = λ_D/(λ_D+λ_S) (see the
+        // "from a datasheet" helper).
         const espHelp = isDerived ? '' : ' ' + _help('datasheet');
+        // A LEAF (LL / M) that the failure net feeds gets a read-only
+        // "incoming from below" panel. The entered rate adds ON TOP of it.
+        const incoming = isDerived ? '' : _incomingHtml(p, existing);
         return `
             <div class="dlg-label">Error specification${espHelp}</div>
             <div id="probSection">${probInner}</div>
-            ${safeField}
+            ${incoming}
             ${detailField}`;
+    }
+
+    /* Read-only "Incoming from below" panel for a LEAF failure mode that the
+       failure net feeds (an LL fed by another LL, or by a Mitigation M). The
+       composition is ADDITIVE: total residual = the rate entered above PLUS
+       this incoming. Hidden when nothing feeds the mode (the common case, so
+       a plain leaf editor is unchanged). MAL/TAL use _derivedProbHtml instead
+       — they have no own rate, so they show the pure composition there. */
+    function _incomingHtml(p, existing) {
+        if (!existing) return '';
+        const incoming = p.failIncoming(existing.id);
+        if (!incoming.length) return '';
+        const own       = p.fmedaResidualFit(existing);
+        const total     = p.fmedaPropagatedResidual(existing.id);
+        const incomeFit = Math.max(0, total - own);
+        const gate      = p.failGateOf(existing.id);
+        const rows = incoming.map(ed => {
+            const src  = p.eventById(ed.from);
+            const isM  = p.isMitigationFailure(ed.from);
+            const el   = src && src.groupId ? p.elementOf(src.groupId) : null;
+            const where = el ? el.name : '';
+            const fit  = p.fmedaPropagatedResidual(ed.from);
+            return `<div class="dlg-ro-row"><span>${fmt.escHtml(src ? src.name : '?')}` +
+                   `${isM ? ' <strong>· M</strong>' : ''}` +
+                   `${where ? ' · ' + fmt.escHtml(where) : ''}</span>` +
+                   `<strong>${fmt.fitStr(fit)}</strong></div>`;
+        }).join('');
+        const gateNote = incoming.length > 1
+            ? ` Combined by the <strong>${gate}</strong> convergence gate.` : '';
+        return `
+            <div class="dlg-label" style="margin-top:.6rem">Incoming from below
+                (${incoming.length})</div>
+            <div class="dlg-readonly">
+                ${rows}
+                <div class="dlg-ro-row" style="border-top:1px solid var(--border,#ccc);margin-top:.3rem;padding-top:.3rem">
+                    <span>Incoming total</span><strong>${fmt.fitStr(incomeFit)}</strong></div>
+                <div class="dlg-note" style="margin-top:.5rem">Your entered rate is
+                    <strong>added on top</strong> of this.${gateNote} Total residual
+                    for this failure = your rate + incoming
+                    = <strong>${fmt.fitStr(total)}</strong>.</div>
+            </div>`;
     }
 
     /* Return the element LEVEL ('top'|'mid') if a failure mode in this
@@ -432,6 +470,30 @@ const dialogs = (() => {
                     directly to it (a pass-through). ${_help('linking')}
                 </div>`;
         }
+        // FMEDA: a failure mode is specified by its authoring PRIMITIVES —
+        // base λ (FIT), failure-mode distribution (FMD %), dangerous fraction
+        // (%), and the two diagnostic coverages (DC₁ %, DC₂ %). The engine
+        // derives λ_D, λ_S, λ_DD and λ_DU from these, so there is one source of
+        // truth and nothing to disagree. The FTA-style "probability of failure
+        // (%)" / "per hour (PFH)" choices are NOT FMEDA inputs and are not
+        // offered. The hidden fInputChoice keeps probMode = coverage on the
+        // existing save path. A failure mode with no primitives yet (legacy
+        // direct/rate or an absolute λ_D from ≤2.2.x) is shown pre-derived for
+        // review; the live project is never mutated on open, only on Save.
+        if (project.mode === 'FMEDA') {
+            const eP       = _fmedaAsPrimitives(project, e);
+            const migrated = !!e.id && e.lambdaBase == null;
+            const note = migrated
+                ? `<div class="dlg-note">Loaded from stored rates and shown as
+                    λ × FMD × dangerous-fraction. Review the split; Save to store
+                    it in this form.</div>`
+                : '';
+            return `
+                <input type="hidden" id="fInputChoice" value="coverage">
+                <div class="dlg-label">Failure rate &amp; classification ${_help('fmedaInput')}</div>
+                ${note}
+                <div id="fModeBody">${_fmedaInputBodyHtml(eP)}</div>`;
+        }
         // A single dropdown chooses HOW the failure is specified. This
         // replaces the old "input mode" radios + a separate UNIT chip group,
         // which overlapped (e.g. direct+FIT vs rate) and caused confusion.
@@ -460,6 +522,79 @@ const dialogs = (() => {
                 ${_modeBodyHtml(e)}
             </div>
         `;
+    }
+
+    /* Build a PRIMITIVE view of a failure mode for the FMEDA editor, WITHOUT
+       mutating the original (which, when editing, IS the live project event).
+       If the mode already carries primitives they pass through; otherwise the
+       stored λ_D / λ_S (coverage) or the legacy direct/rate value is mapped to
+       base λ = λ_D + λ_S, FMD = 100 %, dangerous = λ_D / (λ_D + λ_S). This
+       preserves λ_D and λ_S exactly; the conversion is persisted only on Save. */
+    function _fmedaAsPrimitives(project, e) {
+        if (e.lambdaBase != null) return e;
+        const v = Object.assign({}, e, { probMode: 'coverage' });
+        let lamD = 0, lamS = 0;
+        if (e.probMode === 'coverage') {
+            lamD = Math.max(0, +e.failureRateRaw || 0);
+            lamS = Math.max(0, +e.failureRateSafe || 0);
+        } else if (e.probMode === 'rate') {
+            lamD = Math.max(0, +e.failureRate || 0);
+        } else if (e.probMode === 'direct') {
+            const t = e.missionTimeOverride || project.missionTime || 1;
+            if (e.directUnit === 'PFH')      lamD = Math.max(0, +e.probability || 0) * 1e9;
+            else if (e.directUnit === 'FIT') lamD = Math.max(0, +e.probability || 0);
+            else {   // PFD → equivalent constant rate over the mission, in FIT
+                const pfd = Math.min(1, Math.max(0, +e.probability || 0));
+                lamD = (pfd < 1 && t > 0) ? (-Math.log(1 - pfd) / t) * 1e9 : 0;
+            }
+        }
+        const lamMode = lamD + lamS;
+        v.lambdaBase        = lamMode;
+        v.fmd               = 1;
+        v.dangerousFraction = lamMode > 0 ? lamD / lamMode : 1;
+        v.diagnosticCoverage = +e.diagnosticCoverage || 0;
+        return v;
+    }
+
+    /* The FMEDA failure-mode input block: base λ + FMD % + dangerous % + DC₁ %
+       + DC₂ %, all in one area, fractions shown as whole percents with a greyed
+       % affix. The live readout (#fLive) shows every derived quantity. */
+    function _fmedaInputBodyHtml(e) {
+        const pct = (id, frac) =>
+            `<div class="dlg-affix-wrap">` +
+            `<input class="dlg-inp" id="${id}" type="number" min="0" max="100" step="0.001" ` +
+            `data-pct="1" value="${fmt.pctInputVal(frac)}"><span class="dlg-affix">%</span></div>`;
+        const lam  = e.lambdaBase != null ? e.lambdaBase : (e.failureRateRaw || 0);
+        const fmd  = e.fmd != null ? e.fmd : 1;
+        const dang = e.dangerousFraction != null ? e.dangerousFraction : 1;
+        const dc1  = fmt.clamp(e.diagnosticCoverage, 0, 1, 0);
+        const dc2  = fmt.clamp(e.diagnosticCoverageLatent, 0, 1, 0);
+        return `
+            <div class="dlg-row">
+                ${_field('Base failure rate, λ (FIT) ' + _help('lambdaBase'),
+                    `<div class="dlg-affix-wrap"><input class="dlg-inp" id="fLambdaBase" type="number" min="0" step="any" value="${lam}"><span class="dlg-affix">FIT</span></div>`,
+                    'The mode\'s base failure rate, from a datasheet or reliability prediction. 1 FIT = 1 failure / 10⁹ h. Example: 120 FIT.')}
+                ${_field('Failure-mode distribution, FMD ' + _help('fmd'),
+                    pct('fFmd', fmd),
+                    'This mode\'s share of λ — λ_mode = λ × FMD. Leave 100% if λ is already this single mode\'s rate; use the datasheet FMD table to split a component into several modes.')}
+            </div>
+            <div class="dlg-row">
+                ${_field('Dangerous fraction ' + _help('dangerousFraction'),
+                    pct('fDangerous', dang),
+                    'Share of λ_mode that can violate the safety goal: λ_D = λ_mode × this, and the rest is the safe rate λ_S. 100% treats the whole mode as dangerous (conservative — the previous default).')}
+                ${_field('Diagnostic coverage, DC₁ ' + _help('coverage'),
+                    pct('fDC', dc1),
+                    'Fraction of λ_D the safety mechanism detects. Drives the residual λ_DU and SFF/SPFM. Example: 90% single CRC/BIST, 99% E2E.')}
+            </div>
+            <div class="dlg-row">
+                ${_field('Latent-fault coverage, DC₂ ' + _help('latentCoverage'),
+                    pct('fDCL', dc2),
+                    'ISO 26262 latent-fault coverage — fraction of the detected (multiple-point) faults whose latency is itself revealed. Drives the LFM. Leave 0 if there is no latent-fault check.')}
+                ${_field('Mission time override (h)',
+                    `<input class="dlg-inp" id="fMtO" type="number" min="0" step="any" value="${e.missionTimeOverride != null ? e.missionTimeOverride : ''}">`,
+                    'Blank = use project mission time.')}
+            </div>
+            <div class="dlg-note" id="fLive"></div>`;
     }
 
     /* Map a stored event to the single dropdown choice. */
@@ -615,9 +750,31 @@ const dialogs = (() => {
         if (!live) return;
         const e = _readDraft(eOrig);
         if (e.kind !== 'basic') { live.textContent = ''; return; }
-        // Build a one-off basic event and run the analyzer's per-event
-        // helper logic via a small clone to compute PFD/PFH.
         const t = e.missionTimeOverride || project.missionTime;
+        // FMEDA: show the full derived chain from the primitives so the
+        // computation is visible and traceable (qualification aid).
+        if (project.mode === 'FMEDA' && e.probMode === 'coverage') {
+            const base = Math.max(0, +e.lambdaBase || +e.failureRateRaw || 0);
+            const fmd  = fmt.clamp(e.fmd, 0, 1, 1);
+            const dang = fmt.clamp(e.dangerousFraction, 0, 1, 1);
+            const dc1  = fmt.clamp(e.diagnosticCoverage, 0, 1, 0);
+            const lamMode = base * fmd;
+            const lamD = lamMode * dang, lamS = lamMode * (1 - dang);
+            const lamDD = lamD * dc1,   lamDU = lamD * (1 - dc1);
+            const pfh = lamDU * 1e-9;
+            const sil = fmt.silForPfh(pfh), asil = fmt.asilForPfh(pfh);
+            const star = (asil === 'ASIL A') ? '*' : '';
+            live.innerHTML =
+                'λ<sub>mode</sub> = ' + fmt.fitStr(lamMode) +
+                ' · λ<sub>D</sub> = ' + fmt.fitStr(lamD) +
+                ' · λ<sub>S</sub> = ' + fmt.fitStr(lamS) +
+                '<br>λ<sub>DD</sub> = ' + fmt.fitStr(lamDD) +
+                ' · residual λ<sub>DU</sub> = <strong>' + fmt.fitStr(lamDU) + '</strong>' +
+                ' · PFH = ' + fmt.perHourStr(pfh) +
+                '<br>integrity <strong>' + sil + ' / ' + asil + star + '</strong>';
+            return;
+        }
+        // FTA/ETA: PFD / PFH from the chosen mode.
         let pfd = 0, pfh = 0;
         try {
             if (e.probMode === 'direct') {
@@ -668,6 +825,11 @@ const dialogs = (() => {
         const mtO     = document.getElementById('fMtO');
         const evid    = document.getElementById('fEvidence');
         const safe    = document.getElementById('fSafe');
+        // FMEDA authoring primitives (the % fields carry data-pct="1").
+        const lamB    = document.getElementById('fLambdaBase');
+        const fmdEl   = document.getElementById('fFmd');
+        const dangEl  = document.getElementById('fDangerous');
+        const asFrac  = el => (el.dataset.pct === '1') ? (+el.value / 100) : +el.value;
         if (prob) {
             // When the field is a percentage (PFD unit), convert back to a
             // [0,1] fraction so the engine and storage are unchanged: the
@@ -677,8 +839,13 @@ const dialogs = (() => {
         }
         if (rate)    draft.failureRate        = +rate.value;
         if (rateRaw) draft.failureRateRaw     = +rateRaw.value;
-        if (dc)      draft.diagnosticCoverage = +dc.value;
-        if (dcl)     draft.diagnosticCoverageLatent = +dcl.value;
+        if (lamB)    draft.lambdaBase         = +lamB.value;
+        if (fmdEl)   draft.fmd                = asFrac(fmdEl);
+        if (dangEl)  draft.dangerousFraction  = asFrac(dangEl);
+        // DC fields are percents in the FMEDA editor (data-pct), plain 0–1 in
+        // the FTA/ETA coverage chooser. asFrac honours both.
+        if (dc)      draft.diagnosticCoverage = asFrac(dc);
+        if (dcl)     draft.diagnosticCoverageLatent = asFrac(dcl);
         if (safe)    draft.failureRateSafe = +safe.value;
         if (mtO)     draft.missionTimeOverride = mtO.value === '' ? null : +mtO.value;
         if (evid)    draft.diagnosticEvidence = evid.value;
@@ -723,11 +890,38 @@ const dialogs = (() => {
             } else if (draft.probMode === 'rate') {
                 if (draft.failureRate < 0) { _err('λ must be ≥ 0.'); return; }
             } else if (draft.probMode === 'coverage') {
-                if (draft.failureRateRaw < 0) { _err('λ dangerous must be ≥ 0.'); return; }
+                // FMEDA primitive path: validate base λ and the fractions.
+                if (draft.lambdaBase != null) {
+                    if (+draft.lambdaBase < 0) { _err('Base failure rate λ must be ≥ 0.'); return; }
+                    if (draft.fmd < 0 || draft.fmd > 1) { _err('FMD must be between 0 % and 100 %.'); return; }
+                    if (draft.dangerousFraction < 0 || draft.dangerousFraction > 1) {
+                        _err('Dangerous fraction must be between 0 % and 100 %.'); return;
+                    }
+                } else if (draft.failureRateRaw < 0) {
+                    _err('λ dangerous must be ≥ 0.'); return;
+                }
                 if (draft.diagnosticCoverage < 0 || draft.diagnosticCoverage > 1) {
-                    _err('Diagnostic coverage must be between 0 and 1.'); return;
+                    _err('Diagnostic coverage must be between 0 % and 100 %.'); return;
+                }
+                if (draft.diagnosticCoverageLatent < 0 || draft.diagnosticCoverageLatent > 1) {
+                    _err('Latent-fault coverage must be between 0 % and 100 %.'); return;
                 }
             }
+        }
+        // Derive the λ_D / λ_S mirror from the primitives (when present) so the
+        // stored failureRateRaw/failureRateSafe always agree with the dangerous
+        // fraction and stay readable by ≤2.2.x builds. The current engine reads
+        // the primitives directly, so the mirror can never affect the result.
+        let mirrorRaw  = draft.failureRateRaw;
+        let mirrorSafe = draft.failureRateSafe != null ? Math.max(0, +draft.failureRateSafe || 0) : 0;
+        let primBase = null, primFmd = null, primDang = null;
+        if (draft.probMode === 'coverage' && draft.lambdaBase != null) {
+            primBase = Math.max(0, +draft.lambdaBase || 0);
+            primFmd  = fmt.clamp(draft.fmd, 0, 1, 1);
+            primDang = fmt.clamp(draft.dangerousFraction, 0, 1, 1);
+            const lamMode = primBase * primFmd;
+            mirrorRaw  = lamMode * primDang;
+            mirrorSafe = lamMode * (1 - primDang);
         }
         const patch = {
             name:                draft.name.trim(),
@@ -739,10 +933,13 @@ const dialogs = (() => {
             probability:         draft.probability,
             failureRate:         draft.failureRate,
             missionTimeOverride: draft.missionTimeOverride,
-            failureRateRaw:      draft.failureRateRaw,
+            failureRateRaw:      mirrorRaw,
+            lambdaBase:          primBase,
+            fmd:                 primFmd,
+            dangerousFraction:   primDang,
             diagnosticCoverage:  draft.diagnosticCoverage,
             diagnosticCoverageLatent: draft.diagnosticCoverageLatent != null ? draft.diagnosticCoverageLatent : 0,
-            failureRateSafe:     draft.failureRateSafe != null ? Math.max(0, +draft.failureRateSafe || 0) : 0,
+            failureRateSafe:     mirrorSafe,
             diagnosticEvidence:  draft.diagnosticEvidence || '',
             mitigation:          draft.mitigation || '',
             x:                   draft.x, y: draft.y,
@@ -753,7 +950,7 @@ const dialogs = (() => {
         const p = api.getProject();
         const multiCreate = !existing && p.mode === 'FMEDA';
         if (multiCreate) {
-            const fnIds = _pickListValues('fGroup');
+            const fnIds = picklist.values('fGroup');
             if (!fnIds.length) { _err('Pick at least one function.'); return; }
             // groupId is assigned per chosen function, not from the CSV value.
             const { groupId, ...spec } = patch;
@@ -1031,102 +1228,10 @@ const dialogs = (() => {
         </div>`;
     }
 
-    /* ── pickList: searchable single/multi select ────────────────────
-       A self-contained labelled list control: an optional summary line, a
-       search box, and a scrollable list of "ID — Name" rows with a radio
-       (single) or checkbox (multi) each. Replaces the old search-above-a-
-       native-select pattern everywhere.
-
-       Contract:
-         _pickList({ id, items, selected, multi, placeholder, noneLabel })
-           id        — base id; a hidden <input id="{id}"> holds the value(s),
-                       comma-separated for multi, so existing read paths keep
-                       working via document.getElementById(id).value.
-           items     — [{ value, idText, name }]
-           selected  — string | string[]  (current selection)
-           multi     — boolean (checkboxes vs radios)
-           placeholder, noneLabel — optional copy.
-         Wire with _wirePickList(id, onChange?) after the modal opens.
-         Read with _pickListValue(id) (single) / _pickListValues(id) (multi). */
-    function _pickList({ id, items, selected, multi = false,
-                         placeholder, noneLabel = 'none' }) {
-        const sel = new Set(
-            Array.isArray(selected) ? selected : (selected ? [selected] : []));
-        const n = items.length;
-        const rows = items.map(it => {
-            const checked = sel.has(it.value) ? ' checked' : '';
-            const hay = (it.idText + ' ' + it.name).toLowerCase();
-            return `<label class="picklist-opt" data-hay="${fmt.escHtml(hay)}">
-                <input type="${multi ? 'checkbox' : 'radio'}"
-                       name="${id}__r" value="${fmt.escHtml(it.value)}"${checked}>
-                <span class="picklist-id">${fmt.escHtml(it.idText)}</span>
-                <span class="picklist-dash">—</span>
-                <span class="picklist-nm">${fmt.escHtml(it.name)}</span>
-            </label>`;
-        }).join('');
-        const csv = Array.from(sel).join(',');
-        const summary = _pickListSummary(items, sel, multi, noneLabel);
-        return `
-            <div class="picklist" data-multi="${multi ? 1 : 0}" data-pl="${id}">
-                <input type="hidden" id="${id}" value="${fmt.escHtml(csv)}">
-                <div class="picklist-summary" id="${id}__sum">${summary}</div>
-                <input class="picklist-search" id="${id}__q" type="text"
-                       placeholder="${fmt.escHtml(placeholder || ('Search ' + n + ' items…'))}">
-                <div class="picklist-list" id="${id}__list">
-                    ${rows || '<div class="picklist-empty">No items.</div>'}
-                </div>
-            </div>`;
-    }
-
-    function _pickListSummary(items, selSet, multi, noneLabel) {
-        const n = items.length;
-        if (selSet.size === 0) return `${noneLabel} of ${n}`;
-        if (multi) return `${selSet.size} selected of ${n}`;
-        const v = Array.from(selSet)[0];
-        const it = items.find(i => i.value === v);
-        return it ? `${fmt.escHtml(it.idText)} — ${fmt.escHtml(it.name)}` : `${noneLabel} of ${n}`;
-    }
-
-    function _wirePickList(id, onChange) {
-        const root = document.querySelector('.picklist[data-pl="' + id + '"]');
-        if (!root) return;
-        const multi  = root.getAttribute('data-multi') === '1';
-        const hidden = document.getElementById(id);
-        const sumEl  = document.getElementById(id + '__sum');
-        const q      = document.getElementById(id + '__q');
-        const list   = document.getElementById(id + '__list');
-        const opts   = Array.from(list.querySelectorAll('.picklist-opt'));
-        const items  = opts.map(o => ({
-            value:  o.querySelector('input').value,
-            idText: (o.querySelector('.picklist-id') || {}).textContent || '',
-            name:   (o.querySelector('.picklist-nm') || {}).textContent || ''
-        }));
-        function refresh() {
-            const checked = opts
-                .filter(o => o.querySelector('input').checked)
-                .map(o => o.querySelector('input').value);
-            hidden.value = checked.join(',');
-            sumEl.innerHTML = _pickListSummary(items, new Set(checked), multi, 'none');
-            if (onChange) onChange(hidden.value);
-        }
-        list.addEventListener('change', refresh);
-        if (q) q.addEventListener('input', () => {
-            const needle = q.value.toLowerCase().trim();
-            opts.forEach(o => {
-                const hit = !needle || (o.getAttribute('data-hay') || '').indexOf(needle) !== -1;
-                o.style.display = hit ? '' : 'none';
-            });
-        });
-    }
-
-    function _pickListValue(id) {
-        const h = document.getElementById(id);
-        return h && h.value ? h.value.split(',')[0] : '';
-    }
-    function _pickListValues(id) {
-        const h = document.getElementById(id);
-        return h && h.value ? h.value.split(',').filter(Boolean) : [];
-    }
+    /* The searchable single/multi select that used to live here (_pickList
+       and friends) now lives in its own shared primitive, picklist.js, and
+       is reached through the module API: picklist.create / .wire / .value /
+       .values. See that file for the full contract. */
 
 
     /* ── Event picker V2: search + group-by-kind ─────────────────────
@@ -1239,8 +1344,10 @@ const dialogs = (() => {
             description: '',
             kind:     draft && draft.kind     ? draft.kind     : 'group',
             level:    draft && draft.level    ? draft.level    : null,
+            mitigation: !!(draft && draft.mitigation),
             parentId: draft && draft.parentId ? draft.parentId : null
         };
+        const isMitigation = !!(g.kind === 'element' && g.mitigation);
 
         // Initial member set = events currently pointing to this group.
         const initialMembers = existing
@@ -1261,7 +1368,17 @@ const dialogs = (() => {
                         (g.kind === 'element' || g.kind === 'function');
         let fmedaFields = '';
         if (isFmeda) fmedaFields += `<input type="hidden" id="fGroupKind" value="${g.kind}">`;
-        if (isFmeda && g.kind === 'element') {
+        if (isMitigation) {
+            // A Mitigation is always a low-level element. Lock the level and
+            // carry the flag; show what makes it special instead of the chips.
+            fmedaFields += `<input type="hidden" id="fIsMitigation" value="1">`;
+            fmedaFields += `<div class="dlg-note">
+                <strong>Mitigation element (M).</strong> A low-level element that
+                carries its own functions and failure modes. To address a common
+                cause, draw a failure-net link from one of its failure modes to
+                the common cause (M → cause). It adds its own failure rate to the
+                chain like any cause — it never subtracts.</div>`;
+        } else if (isFmeda && g.kind === 'element') {
             const levels = [['top','Top level'],['mid','Mid level'],['low','Low level']];
             const opts = levels.map(([v,l]) =>
                 `<label class="dlg-chip ${g.level === v ? 'dlg-chip-on' : ''}">
@@ -1271,7 +1388,7 @@ const dialogs = (() => {
                 <div class="dlg-chips" id="fLevelChips">${opts}</div>`;
         } else if (isFmeda && g.kind === 'function') {
             fmedaFields += _field('Parent element',
-                _pickList({ id: 'fParent', items: _elementPickItems(p),
+                picklist.create({ id: 'fParent', items: _elementPickItems(p),
                             selected: g.parentId, multi: false,
                             placeholder: 'Search elements…' }),
                 'The architecture element this function belongs to.');
@@ -1280,15 +1397,37 @@ const dialogs = (() => {
             const fmItems = _failureModePickItems(p);
             if (fmItems.length) {
                 fmedaFields += _field('Copy failure modes (optional)',
-                    _pickList({ id: 'fCopyFms', items: fmItems, selected: [],
+                    picklist.create({ id: 'fCopyFms', items: fmItems, selected: [],
                                 multi: true,
                                 placeholder: 'Search failure modes to copy…' }),
                     'Duplicate the selected failure modes into this function, reusing their description and properties. Each copy is independent of the original.');
             }
         }
 
+        // Route 1ₕ inputs for any element (element kind, incl. mitigation
+        // elements): IEC 61508 element Type A/B and hardware fault tolerance.
+        if (isFmeda && g.kind === 'element') {
+            const et = (g.elementType === 'A') ? 'A' : 'B';
+            const hv = Math.max(0, Math.min(2, parseInt(g.hft, 10) || 0));
+            const typeOpts = [['A', 'Type A — simple'], ['B', 'Type B — complex']].map(([v, l]) =>
+                `<label class="dlg-chip ${et === v ? 'dlg-chip-on' : ''}">
+                    <input type="radio" name="fElType" value="${v}" ${et === v ? 'checked' : ''}>
+                    <span>${l}</span></label>`).join('');
+            const hftOpts = [0, 1, 2].map(v =>
+                `<label class="dlg-chip ${hv === v ? 'dlg-chip-on' : ''}">
+                    <input type="radio" name="fHft" value="${v}" ${hv === v ? 'checked' : ''}>
+                    <span>${v}</span></label>`).join('');
+            fmedaFields += `<div class="dlg-label" style="margin-top:0.4rem">Element type — IEC 61508 Route 1ₕ</div>
+                <div class="dlg-chips" id="fElTypeChips">${typeOpts}</div>
+                <div class="dlg-hint" style="margin:0.2rem 0 0.4rem">Type A = simple, well-characterised; Type B = complex (e.g. a microcontroller or ASIC). With the element's SFF and HFT this caps the SIL it may claim.</div>
+                <div class="dlg-label">Hardware fault tolerance (HFT)</div>
+                <div class="dlg-chips" id="fHftChips">${hftOpts}</div>
+                <div class="dlg-hint" style="margin:0.2rem 0 0">Redundancy: HFT N means N+1 faults are needed to lose the safety function. A single non-redundant channel is HFT 0.</div>`;
+        }
+
         modal.open((existing ? 'Edit ' : 'New ') +
-            (isFmeda ? (g.kind === 'element' ? 'element' : 'function') : 'group'), `
+            (isMitigation ? 'mitigation'
+                          : (isFmeda ? (g.kind === 'element' ? 'element' : 'function') : 'group')), `
             ${_errBox()}
             ${_field('Name',
                 `<input class="dlg-inp" id="fName" type="text" maxlength="40" value="${fmt.escHtml(g.name)}">`,
@@ -1343,8 +1482,17 @@ const dialogs = (() => {
                     c.classList.toggle('dlg-chip-on', c.querySelector('input').checked));
             });
         });
-        _wirePickList('fParent');
-        _wirePickList('fCopyFms');
+        // Route 1ₕ Type / HFT chips: same on-state toggle behaviour.
+        ['fElTypeChips', 'fHftChips'].forEach(id => {
+            document.querySelectorAll('#' + id + ' input').forEach(r => {
+                r.addEventListener('change', () => {
+                    document.querySelectorAll('#' + id + ' .dlg-chip').forEach(c =>
+                        c.classList.toggle('dlg-chip-on', c.querySelector('input').checked));
+                });
+            });
+        });
+        picklist.wire('fParent');
+        picklist.wire('fCopyFms');
 
         // Member picker — searchable, grouped by kind. Absent in FMEDA
         // (functions don't use the FFI member boundary), so guard for it.
@@ -1375,13 +1523,20 @@ const dialogs = (() => {
         // FMEDA fields, if present in the dialog.
         const kindH = document.getElementById('fGroupKind');
         if (kindH && kindH.value) patch.kind = kindH.value;
+        const mitH = document.getElementById('fIsMitigation');
+        if (mitH && mitH.value === '1') { patch.mitigation = true; patch.level = 'low'; }
         const levelR = document.querySelector('input[name="fLevel"]:checked');
         if (levelR) patch.level = levelR.value;
+        // Route 1ₕ inputs (elements only).
+        const typeR = document.querySelector('input[name="fElType"]:checked');
+        if (typeR) patch.elementType = (typeR.value === 'A') ? 'A' : 'B';
+        const hftR = document.querySelector('input[name="fHft"]:checked');
+        if (hftR) patch.hft = Math.max(0, Math.min(2, parseInt(hftR.value, 10) || 0));
         const parentSel = document.getElementById('fParent');
         if (parentSel && parentSel.value) patch.parentId = parentSel.value;
 
         // Failure modes selected to copy into this function.
-        const copyIds = _pickListValues('fCopyFms');
+        const copyIds = picklist.values('fCopyFms');
 
         let targetId;
         if (existing) {
@@ -1539,11 +1694,28 @@ const dialogs = (() => {
     function openNewProject(onSubmit, onDemo) {
         const presetOpts = CONFIG.missionTimePresets.map(p =>
             `<option value="${p.hours}">${fmt.escHtml(p.label)}</option>`).join('');
+        // Read the chosen analysis type at click time (the modal DOM is gone
+        // once modal.close() runs, so capture before closing).
+        const pickedMode = () => {
+            const sel = document.getElementById('fMode');
+            const m = sel ? sel.value : 'FTA';
+            return ['FTA', 'ETA', 'FMEDA'].includes(m) ? m : 'FTA';
+        };
+        // Reference variant — only meaningful for FMEDA, which ships two
+        // worked examples (the ASIL-C pass and the QM calibration case).
+        // Other modes ignore it (their builder takes no variant).
+        const pickedVariant = () => {
+            const sel = document.getElementById('fRef');
+            return (sel && pickedMode() === 'FMEDA') ? sel.value : null;
+        };
         const footer = [];
         if (typeof onDemo === 'function') {
             footer.push({
-                label: 'Load demo', cls: 'btn-sec btn-left',
-                onClick: () => { modal.close(); onDemo(); }
+                label: 'Load reference', cls: 'btn-sec btn-left',
+                onClick: () => {
+                    const m = pickedMode(), v = pickedVariant();
+                    modal.close(); onDemo(m, v);
+                }
             });
         }
         footer.push({ label: 'Cancel', cls: 'btn-sec', onClick: modal.close });
@@ -1552,13 +1724,34 @@ const dialogs = (() => {
             onClick: () => {
                 const name = document.getElementById('fName').value.trim() || 'Untitled project';
                 const mt   = parseFloat(document.getElementById('fMT').value);
+                const mode = pickedMode();
                 if (isNaN(mt) || mt <= 0) { _err('Mission time must be a positive number.'); return; }
-                onSubmit({ name, missionTime: mt });
+                onSubmit({ name, missionTime: mt, mode });
                 modal.close();
             }
         });
         modal.open('New project', `
             ${_errBox()}
+            ${_field('Analysis type',
+                `<select class="dlg-inp" id="fMode">
+                    <option value="FTA">FTA — Fault Tree Analysis</option>
+                    <option value="ETA">ETA — Event Tree Analysis</option>
+                    <option value="FMEDA">FMEDA — Failure Modes, Effects &amp; Diagnostics</option>
+                </select>`,
+                'Pick the kind of analysis. <strong>Load reference</strong> opens a ' +
+                'worked example of this type to learn from or build on; ' +
+                '<strong>Create</strong> starts an empty one. You can switch type later.')}
+            <div id="fRefRow" style="display:none">
+            ${_field('Reference example',
+                `<select class="dlg-inp" id="fRef">
+                    <option value="pass">Worked example — meets ASIL C (random-hardware metrics)</option>
+                    <option value="">Calibration — an uncovered fault stays QM</option>
+                </select>`,
+                'Which FMEDA reference <strong>Load reference</strong> opens. The worked ' +
+                'example is a fully-covered design whose metrics roll up to a clean ' +
+                'ASIL C; the calibration case keeps one uncovered single-point fault, ' +
+                'so it stays QM on purpose. (No effect on <strong>Create</strong>.)')}
+            </div>
             ${_field('Project name',
                 `<input class="dlg-inp" id="fName" type="text" maxlength="60" placeholder="e.g. Brake-by-wire FTA">`)}
             ${_field('Mission time preset',
@@ -1571,7 +1764,7 @@ const dialogs = (() => {
                 `<input class="dlg-inp" id="fMT" type="number" min="1" step="1" value="${CONFIG.defaultMissionTime}">`,
                 'Operating duration over which the failure probability accumulates.')}
             ${typeof onDemo === 'function'
-                ? '<div class="dlg-note">New here? <strong>Load demo</strong> opens a worked brake-by-wire FMEDA that shows every feature.</div>'
+                ? '<div class="dlg-note">New here? Pick an analysis type and press <strong>Load reference</strong> for a worked example that exercises every feature — it opens untitled, so you can rename it and make it your own.</div>'
                 : ''}
         `, footer);
 
@@ -1581,10 +1774,46 @@ const dialogs = (() => {
         if (sel) sel.addEventListener('change', () => {
             if (sel.value) inp.value = sel.value;
         });
+        // Reveal the FMEDA reference-variant picker only for FMEDA.
+        const modeSel = document.getElementById('fMode');
+        const refRow  = document.getElementById('fRefRow');
+        const syncRefRow = () => {
+            if (refRow) refRow.style.display = (modeSel && modeSel.value === 'FMEDA') ? '' : 'none';
+        };
+        if (modeSel) modeSel.addEventListener('change', syncRefRow);
+        syncRefRow();
         // Pre-select preset if current value matches one.
         if (sel && inp) {
             const match = CONFIG.missionTimePresets.find(p => +p.hours === +inp.value);
             if (match) sel.value = String(match.hours);
+        }
+    }
+
+    /* ════════════════════════════════════════════════════════════════
+       RENAME — name (or rename) the active project
+       ════════════════════════════════════════════════════════════════ */
+
+    function openRename(current, onSubmit) {
+        const submit = () => {
+            const name = document.getElementById('fRename').value.trim();
+            modal.close();
+            if (typeof onSubmit === 'function') onSubmit(name);
+        };
+        modal.open('Name this project', `
+            ${_field('Project name',
+                `<input class="dlg-inp" id="fRename" type="text" maxlength="60"
+                        placeholder="e.g. Brake-by-wire FTA" value="${fmt.escHtml(current || '')}">`,
+                'A reference opens untitled — give it a name to make it your own. ' +
+                'Leave blank to keep it untitled.')}
+        `, [
+            { label: 'Cancel', cls: 'btn-sec', onClick: modal.close },
+            { label: 'Save name', cls: 'btn-primary', onClick: submit }
+        ]);
+        const f = document.getElementById('fRename');
+        if (f) {
+            f.focus();
+            f.select();
+            f.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
         }
     }
 
@@ -1730,8 +1959,12 @@ const dialogs = (() => {
         if (cc.length) {
             lines.push('## Common-cause findings (' + cc.length + ')');
             cc.forEach(f => {
+                const src = p.eventById(f.sourceId);
+                const status = f.addressedByM
+                    ? ' — addressed by mitigation ' + (f.mitigationIds || []).join(', ')
+                    : ((src && src.commonCauseMitigated) ? ' — manually flagged mitigated' : ' — OPEN');
                 lines.push('- ' + f.sourceName + ' [' + f.sourceId + '] defeats ' +
-                    f.functionCount + ' functions:');
+                    f.functionCount + ' functions' + status + ':');
                 f.targets.forEach(t =>
                     lines.push('   - ' + t.elementName + ' · ' + t.functionName + ' · ' + t.name));
             });
@@ -1777,8 +2010,9 @@ const dialogs = (() => {
                 analysis.events.forEach(ev => {
                     lines.push('- (' + ev.kind + ') ' + ev.name +
                                ' — P=' + fmt.probStr(ev.pfd) +
-                               (ev.kind === 'top' ? '' : ', contribution ' +
-                                    (ev.contribution > 0 ? (ev.contribution*100).toFixed(2) + '%' : '—')));
+                               (ev.kind === 'basic' ? ', importance (FV) ' +
+                                    (ev.contribution > 0 ? (ev.contribution*100).toFixed(2) + '%' : '—')
+                                  : ''));
                 });
             }
         }
@@ -1852,7 +2086,7 @@ const dialogs = (() => {
     return {
         init,
         openEventEdit, openGateEdit, openLinkEdit, openGroupEdit, openScenarioEdit,
-        openNewProject, openExport, openHelp,
+        openNewProject, openRename, openExport, openHelp,
         confirm
     };
 })();
