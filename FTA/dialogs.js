@@ -338,13 +338,13 @@ const dialogs = (() => {
         const gateNote = incoming.length > 1
             ? ` Combined by the <strong>${gate}</strong> convergence gate.` : '';
         return `
-            <div class="dlg-label" style="margin-top:.6rem">Incoming from below
+            <div class="dlg-label dlg-label--gap">Incoming from below
                 (${incoming.length})</div>
             <div class="dlg-readonly">
                 ${rows}
-                <div class="dlg-ro-row" style="border-top:1px solid var(--border,#ccc);margin-top:.3rem;padding-top:.3rem">
+                <div class="dlg-ro-row dlg-ro-row--divider">
                     <span>Incoming total</span><strong>${fmt.fitStr(incomeFit)}</strong></div>
-                <div class="dlg-note" style="margin-top:.5rem">Your entered rate is
+                <div class="dlg-note">Your entered rate is
                     <strong>added on top</strong> of this.${gateNote} Total residual
                     for this failure = your rate + incoming
                     = <strong>${fmt.fitStr(total)}</strong>.</div>
@@ -387,7 +387,7 @@ const dialogs = (() => {
                 <div class="dlg-ro-row"><span>Residual rate</span><strong>${fmt.fitStr(res)}</strong></div>
                 <div class="dlg-ro-row"><span>Diagnostic coverage</span><strong>${Math.round(dc * 100)}%</strong></div>
                 <div class="dlg-ro-row"><span>Achieved integrity</span><strong>${fmt.pfhDualStr(pfh)} · ${band}</strong></div>
-                <div class="dlg-note" style="margin-top:.5rem">Determined by the
+                <div class="dlg-note">Determined by the
                     contributing lower-level failure modes and their mitigations.
                     Strengthen the diagnostics on those failure modes to improve
                     these figures.</div>
@@ -694,10 +694,10 @@ const dialogs = (() => {
             `<option value="${o.value}"${o.value === current ? ' selected' : ''}>` +
             `${fmt.escHtml(o.label)}</option>`).join('');
         return `
-            <div class="dlg-label" style="margin-top:0.6rem">
+            <div class="dlg-label dlg-label--gap">
                 Safety target ${_help('target')}
             </div>
-            <div class="dlg-note" style="margin-top:0;">
+            <div class="dlg-note dlg-note--flush">
                 Pick the SIL or ASIL the top event must achieve. On Recalculate
                 the tool compares the computed PFH against this target's bound
                 and shows met / missed.
@@ -1006,7 +1006,7 @@ const dialogs = (() => {
                     <option value="INHIBIT" ${g.type==='INHIBIT'? 'selected':''}>INHIBIT</option>
                 </select>`)}`}
             <div class="dlg-note" id="gNote"></div>
-            <div class="dlg-label" style="margin-top:0.4rem">
+            <div class="dlg-label dlg-label--gap-sm">
                 Inputs (events feeding this gate)
             </div>
             ${_pickerSearchBar('gInputsSearch', 'Search events…')}
@@ -1293,7 +1293,7 @@ const dialogs = (() => {
             });
         }
         if (!html.trim()) {
-            html = `<div class="ctrl-empty" style="padding:0.6rem">${filter ? 'No matches.' : 'No selectable events.'}</div>`;
+            html = `<div class="ctrl-empty">${filter ? 'No matches.' : 'No selectable events.'}</div>`;
         }
         el.innerHTML = html;
         el.dataset.selected = JSON.stringify(selected);
@@ -1424,12 +1424,12 @@ const dialogs = (() => {
                 `<label class="dlg-chip ${hv === v ? 'dlg-chip-on' : ''}">
                     <input type="radio" name="fHft" value="${v}" ${hv === v ? 'checked' : ''}>
                     <span>${v}</span></label>`).join('');
-            fmedaFields += `<div class="dlg-label" style="margin-top:0.4rem">Element type — IEC 61508 Route 1ₕ</div>
+            fmedaFields += `<div class="dlg-label dlg-label--gap-sm">Element type — IEC 61508 Route 1ₕ</div>
                 <div class="dlg-chips" id="fElTypeChips">${typeOpts}</div>
-                <div class="dlg-hint" style="margin:0.2rem 0 0.4rem">Type A = simple, well-characterised; Type B = complex (e.g. a microcontroller or ASIC). With the element's SFF and HFT this caps the SIL it may claim.</div>
+                <div class="dlg-hint dlg-hint--block">Type A = simple, well-characterised; Type B = complex (e.g. a microcontroller or ASIC). With the element's SFF and HFT this caps the SIL it may claim.</div>
                 <div class="dlg-label">Hardware fault tolerance (HFT)</div>
                 <div class="dlg-chips" id="fHftChips">${hftOpts}</div>
-                <div class="dlg-hint" style="margin:0.2rem 0 0">Redundancy: HFT N means N+1 faults are needed to lose the safety function. A single non-redundant channel is HFT 0.</div>`;
+                <div class="dlg-hint dlg-hint--block-flush">Redundancy: HFT N means N+1 faults are needed to lose the safety function. A single non-redundant channel is HFT 0.</div>`;
         }
 
         modal.open((existing ? 'Edit ' : 'New ') +
@@ -1451,8 +1451,8 @@ const dialogs = (() => {
                         : 'Free-text. Use to document a Freedom From Interference argument when accepting a flagged warning. ' + _help('ffi'))}
 
             ${isFmeda ? '' : `
-            <div class="dlg-label" style="margin-top:0.4rem">Members</div>
-            <div class="dlg-hint" style="margin-bottom:0.4rem">
+            <div class="dlg-label dlg-label--gap-sm">Members</div>
+            <div class="dlg-hint dlg-hint--mb">
                 Pick events that share this independence boundary. ${_help('ffi')}
             </div>
             ${_pickerSearchBar('gMemSearch', 'Search events…')}
@@ -1658,7 +1658,7 @@ const dialogs = (() => {
             });
             html += `</div></div>`;
         });
-        if (!html.trim()) html = `<div class="ctrl-empty" style="padding:0.6rem">${filter ? 'No matches.' : 'No events yet.'}</div>`;
+        if (!html.trim()) html = `<div class="ctrl-empty">${filter ? 'No matches.' : 'No events defined.'}</div>`;
         el.innerHTML = html;
 
         el.querySelectorAll('input[type="checkbox"]').forEach(cb => {
@@ -1716,7 +1716,7 @@ const dialogs = (() => {
                     const m = pickedMode();
                     // FMEDA has one canonical reference: the worked brake-by-wire
                     // model that exercises every feature and is correct end-to-end.
-                    modal.close(); onDemo(m, m === 'FMEDA' ? 'pass' : null);
+                    modal.close(); onDemo(m);
                 }
             });
         }
@@ -1863,7 +1863,7 @@ const dialogs = (() => {
         const fitU = v => fmt.fitStr(v);
         lines.push('## FMEDA metrics');
         if (!(t.lambdaTotal > 0)) {
-            lines.push('- No quantified leaf failure modes yet.');
+            lines.push('- No quantified leaf failure modes.');
         } else {
             lines.push('- λ_Total,Safety: ' + fitU(t.lambdaTotal));
             lines.push('- λ_SD: ' + fitU(t.lambdaSD) + ' · λ_SU: ' + fitU(t.lambdaSU));
@@ -1895,7 +1895,7 @@ const dialogs = (() => {
         // leaves that feed them (their subtree verdict). One source
         // (fmedaElementBands) so the report matches the canvas and right pane.
         lines.push('## Architecture elements (' + ru.elements.length + ')');
-        if (!ru.elements.length) lines.push('- None yet.');
+        if (!ru.elements.length) lines.push('- None defined.');
         const elBands = p.fmedaElementBands(iso);
         const metById = {};
         m.elements.forEach(e => { if (e.id) metById[e.id] = e; });
@@ -1948,7 +1948,7 @@ const dialogs = (() => {
             lines.push('- ' + sr.srId + ' [' + sr.eventId + '] — ' + sr.elementName +
                 ' · ' + sr.functionName + ' · ' + sr.name);
             lines.push('   - ' + (sr.credited ? 'DC ' + Math.round(sr.dc * 100) + '%'
-                                              : 'no diagnostic coverage credited yet') +
+                                              : 'no diagnostic coverage credited') +
                 ' — ' + sr.mitigation);
         });
         lines.push('');
@@ -2033,7 +2033,7 @@ const dialogs = (() => {
                     <span class="export-ic">◌</span> Save Diagram — Simple
                 </button>
             </div>
-            <div class="dlg-label" style="margin-top:0.6rem">Report (Markdown)</div>
+            <div class="dlg-label dlg-label--gap">Report (Markdown)</div>
             <textarea class="dlg-inp" id="fExport" rows="10" readonly>${fmt.escHtml(text)}</textarea>
         `, [
             { label: 'Close', cls: 'btn-sec', onClick: modal.close },

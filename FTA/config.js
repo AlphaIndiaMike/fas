@@ -13,7 +13,7 @@ const CONFIG = {
        and stamped into exported reports / saved projects. BUMP THIS ON
        EVERY ITERATION of development — patch for fixes, minor for new
        features, major for breaking changes. */
-    appVersion:  '2.7.5',
+    appVersion:  '2.8.0',
     releaseDate: '2026-06-16',
 
     /* JSON file-format version. v2 added direct links; v3 was an earlier
@@ -290,7 +290,7 @@ const CONFIG = {
             body:
                 '<p><strong>Diagnostic coverage</strong> (DC) is the fraction of <em>dangerous</em> failures of a sub-element detected by an associated diagnostic mechanism — per <em>IEC 61508-4 §3.8.7</em> and <em>ISO 26262-1:2018</em>. The DC denominator is the dangerous failure rate λ<sub>D</sub>, <em>not</em> the total failure rate.</p>' +
                 '<p>The undetected dangerous (residual) rate that propagates into the fault tree is:</p>' +
-                '<p style="text-align:center"><code>λ<sub>DU</sub> = λ<sub>D</sub> × (1 − DC)</code></p>' +
+                '<p class="dlg-formula"><code>λ<sub>DU</sub> = λ<sub>D</sub> × (1 − DC)</code></p>' +
                 '<p><strong>Important:</strong> enter the dangerous failure rate, not the device\'s total rate. Datasheets often quote total λ; you must extract the dangerous fraction from the FMEDA before entering it here. A typical electronic component has roughly half its failures classified as dangerous (the rest are safe or no-effect), but the split varies — always source it from the FMEDA, not a rule of thumb.</p>' +
                 '<p><strong>Typical DC reference values</strong> (always justify against your own evidence):</p>' +
                 '<ul>' +
@@ -424,7 +424,7 @@ const CONFIG = {
             body:
                 '<p><strong>Recalculate</strong> computes each failure mode\'s residual dangerous-undetected rate (FIT), rolls it up per function and element, and derives the hardware metrics below.</p>' +
                 '<p><strong>Residual (per failure mode).</strong> Diagnostic coverage drives the number directly, whether or not a mitigation requirement is written:</p>' +
-                '<p style="text-align:center"><code>λ<sub>DU</sub> = λ<sub>D</sub> × (1 − DC<sub>1</sub>)</code></p>' +
+                '<p class="dlg-formula"><code>λ<sub>DU</sub> = λ<sub>D</sub> × (1 − DC<sub>1</sub>)</code></p>' +
                 '<p><strong>Leaf failures</strong> (low-level, no incoming cause arrows) use their own entered rate. <strong>Derived failures</strong> (top/mid, with incoming failure-net arrows) ignore any typed rate and inherit from their causes; where several causes converge a visible <strong>AND/OR gate</strong> sets how they combine (OR sums the rates; AND takes the joint). Mitigating only at a mid level will not clear the top until the lower path is handled.</p>' +
                 '<hr>' +
                 '<p><strong>The two diagnostic coverages</strong></p>' +

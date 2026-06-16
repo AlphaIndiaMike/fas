@@ -307,10 +307,9 @@ const demo = (function () {
        demo.build() call (and any ≤2.4 saved expectation) still resolves. The
        FMEDA reference is the worked brake-by-wire model (buildFMEDApass) — the
        single reference offered in the UI; it exercises every feature and rolls
-       up to a clean ASIL C. `variant` is accepted for call-site compatibility
-       but no longer selects an alternative model (the QM calibration case is
-       now a test-suite fixture, not shipped). */
-    function build(mode, variant) {
+       up to a clean ASIL C. (The QM calibration case is now a test-suite
+       fixture, not shipped, so no alternative model is selectable here.) */
+    function build(mode) {
         const fn = BUILDERS[mode] || buildFMEDApass;
         return fn();
     }

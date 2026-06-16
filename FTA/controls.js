@@ -68,19 +68,19 @@ const controls = (() => {
                     <button type="button" class="fmeda-net-btn"    data-net="func">Function net</button>
                     <button type="button" class="fmeda-net-btn"    data-net="fail">Failure net</button>
                 </div>
-                <div class="ctrl-section-hd" style="margin-top:12px">Auto-connect</div>
-                <div class="fmeda-autoconnect" style="display:flex;flex-direction:column;gap:6px">
+                <div class="ctrl-section-hd ctrl-section-hd--gap">Auto-connect</div>
+                <div class="fmeda-autoconnect">
                     <button type="button" class="btn btn-sec" id="btnAutoFunc"
                             title="For each architecture link, connect every function of the source element to every function of the target.">⇄ Functions from architecture</button>
                     <button type="button" class="btn btn-sec" id="btnAutoFail"
                             title="For each function link, connect every failure mode of the source function to every failure mode of the target (cause → effect).">⇄ Failure modes from functions</button>
                 </div>
-                <div class="ctrl-section-hd" style="margin-top:12px">Common-cause findings</div>
+                <div class="ctrl-section-hd ctrl-section-hd--gap">Common-cause findings</div>
                 <div id="ctrlCommonCause" class="ctrl-commoncause">
                     <div class="ctrl-empty">Build the failure net — one failure
                         reaching two functions is flagged here.</div>
                 </div>
-                <div class="ctrl-section-hd" style="margin-top:12px">Residual failure rate
+                <div class="ctrl-section-hd ctrl-section-hd--gap">Residual failure rate
                     <button type="button" class="dlg-help" data-help="fmedaResidual" title="What is this?">?</button>
                 </div>
                 <div id="ctrlResidual" class="ctrl-residual">
@@ -94,7 +94,7 @@ const controls = (() => {
             <div class="ctrl-section" id="ctrlWarningsSec">
                 <div class="ctrl-section-hd">Warnings</div>
                 <div id="ctrlWarnings" class="ctrl-warnings">
-                    <div class="ctrl-empty">No analysis yet. Press Recalculate.</div>
+                    <div class="ctrl-empty">No analysis available. Run Recalculate to compute results.</div>
                 </div>
             </div>
 
@@ -108,7 +108,7 @@ const controls = (() => {
             <div class="ctrl-section" id="ctrlBreakdownSec">
                 <div class="ctrl-section-hd">Event breakdown</div>
                 <div id="ctrlBreakdown" class="ctrl-breakdown">
-                    <div class="ctrl-empty">No analysis yet.</div>
+                    <div class="ctrl-empty">No analysis available. Run Recalculate to compute results.</div>
                 </div>
             </div>
 
@@ -222,7 +222,7 @@ const controls = (() => {
         _renderScenarios();
         if (_mode === 'FMEDA') _renderCommonCause(project);
         if (!_analysis) {
-            // Reset summary / warnings / breakdown to "no analysis yet"
+            // Reset summary / warnings / breakdown to their no-analysis state
             _renderSummary(null);
             _renderWarnings(null);
             _renderBreakdown(null);
@@ -359,8 +359,8 @@ const controls = (() => {
                 el.innerHTML = `
                     <div class="ctrl-section-hd">Final events</div>
                     <div class="ctrl-empty">
-                        No final events yet. Add events and mark one or more
-                        as "final", then Recalculate.
+                        No final events defined. Add events, mark one or more
+                        as final, then Recalculate.
                     </div>`;
                 return;
             }
@@ -375,7 +375,7 @@ const controls = (() => {
             el.innerHTML = `
                 <div class="ctrl-section-hd">Top event</div>
                 <div class="ctrl-empty">
-                    No top event set, or analysis not yet run.
+                    No top event set, or analysis has not been run.
                 </div>`;
             return;
         }
@@ -493,7 +493,7 @@ const controls = (() => {
         const el = document.getElementById('ctrlWarnings');
         if (!el) return;
         if (!analysis) {
-            el.innerHTML = `<div class="ctrl-empty">No analysis yet. Press Recalculate.</div>`;
+            el.innerHTML = `<div class="ctrl-empty">No analysis available. Run Recalculate to compute results.</div>`;
             return;
         }
         if (!analysis.warnings || analysis.warnings.length === 0) {
@@ -590,7 +590,7 @@ const controls = (() => {
         const el = document.getElementById('ctrlBreakdown');
         if (!el) return;
         if (!analysis || analysis.events.length === 0) {
-            el.innerHTML = `<div class="ctrl-empty">No analysis yet.</div>`;
+            el.innerHTML = `<div class="ctrl-empty">No analysis available. Run Recalculate to compute results.</div>`;
             return;
         }
         const simple = (_viewMode === 'simplified');
@@ -686,7 +686,7 @@ const controls = (() => {
             const cap     = t.route1hSil;                       // null if no element SFF
             const claim   = (cap == null) ? bandSil : fmt.silMin(bandSil, cap);
             const capRow  = (cap == null)
-                ? `<div class="res-m-note">No element carries a computed SFF yet, so the Route 1<sub>H</sub> architectural cap is not evaluated. Add failure modes to your elements (and set each element's Type A/B and HFT) to apply it.</div>`
+                ? `<div class="res-m-note">No element carries a computed SFF, so the Route 1<sub>H</sub> architectural cap is not evaluated. Add failure modes to your elements (and set each element's Type A/B and HFT) to apply it.</div>`
                 : `${row('Architectural cap (Route 1<sub>H</sub>)',
                         '<strong>' + fmt.escHtml(cap) + '</strong>')}` +
                   `<div class="res-m-tgt">limiting element: ${fmt.escHtml(t.route1hLimiter || '—')}</div>`;
@@ -741,7 +741,7 @@ const controls = (() => {
         const el = document.getElementById('ctrlResidual');
         if (!el) return;
         if (!rollup || !rollup.functions.length) {
-            el.innerHTML = `<div class="ctrl-empty">No failure modes yet.</div>`;
+            el.innerHTML = `<div class="ctrl-empty">No failure modes defined.</div>`;
             return;
         }
         const simple = (_viewMode === 'simplified');
@@ -815,7 +815,7 @@ const controls = (() => {
                         <div class="res-fn">${fmt.escHtml(elr.name)}
                             <span class="res-id">${fmt.escHtml(elr.id)}</span>
                             ${elr.level ? `<span class="res-lvl">${fmt.escHtml(elr.level)}</span>` : ''}</div>
-                        <div class="res-levels">${chip || '<span class="res-raw">no integrity yet</span>'}</div>
+                        <div class="res-levels">${chip || '<span class="res-raw">Integrity not yet computed</span>'}</div>
                         <div class="res-pfh">total residual ${fitStr(elr.residualFit)}</div>
                     </div>`;
             });
@@ -839,7 +839,7 @@ const controls = (() => {
                 // confusing "X FIT of X FIT raw".
                 const reductionLine = reduced > 0
                     ? `<span class="res-cut">−${reduced}% vs ${fitStr(f.rawFit)} raw</span>`
-                    : `<span class="res-raw">no diagnostic credit (raw = residual)</span>`;
+                    : `<span class="res-raw">No diagnostic credit (raw = residual)</span>`;
                 body = `
                     <div class="res-levels">${bandChips(pfh)}</div>
                     <div class="res-nums">residual <strong>${fitStr(f.residualFit)}</strong>
@@ -870,10 +870,10 @@ const controls = (() => {
             srs.forEach(sr => {
                 html += `
                     <div class="res-card res-sr-card">
-                        <div class="res-fn"><span class="res-sr-id">${sr.srId}</span>
+                        <div class="res-fn"><span class="res-sr-id">${fmt.escHtml(sr.srId)}</span>
                             ${fmt.escHtml(sr.name)}
                             <span class="res-el">(${fmt.escHtml(sr.elementName)} · ${fmt.escHtml(sr.functionName)})</span></div>
-                        <div class="res-sr-mit">${fmt.escHtml(sr.mitigation)} <span class="res-raw">— ${sr.credited ? 'DC ' + Math.round(sr.dc * 100) + '%' : 'no diagnostic coverage credited yet'}</span></div>
+                        <div class="res-sr-mit">${fmt.escHtml(sr.mitigation)} <span class="res-raw">— ${sr.credited ? 'DC ' + Math.round(sr.dc * 100) + '%' : 'No diagnostic coverage credited'}</span></div>
                     </div>`;
             });
         }

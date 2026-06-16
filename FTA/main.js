@@ -370,10 +370,7 @@ const main = (() => {
             el = document.createElement('div');
             el.id = 'fasFlash';
             el.setAttribute('role', 'status');
-            el.style.cssText =
-                'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);' +
-                'background:#2c2c2a;color:#fbfaf6;padding:8px 14px;border-radius:6px;' +
-                'font-size:13px;z-index:9999;max-width:520px;box-shadow:0 2px 8px rgba(0,0,0,0.25);';
+            el.className = 'fas-flash';
             document.body.appendChild(el);
         }
         el.textContent = msg;
@@ -774,11 +771,11 @@ const main = (() => {
         dialogs.openNewProject(_proceedNewProject, _proceedDemo);
     }
 
-    function _proceedDemo(mode, variant) {
+    function _proceedDemo(mode) {
         fmt.resetUid();
         const m = ['FTA', 'ETA', 'FMEDA'].includes(mode) ? mode : 'FMEDA';
         project = (typeof demo !== 'undefined' && demo.build)
-            ? demo.build(m, variant) : new Project('');
+            ? demo.build(m) : new Project('');
         activeScenario = null;
         _lastAnalysis  = null;
         // References seed every node at the same default spot, so force one
@@ -876,12 +873,9 @@ const main = (() => {
 window.addEventListener('DOMContentLoaded', () => {
     if (typeof cytoscape === 'undefined') {
         document.body.innerHTML = `
-            <div style="display:flex;flex-direction:column;align-items:center;
-                justify-content:center;height:100vh;gap:1rem;
-                font-family:'Outfit',sans-serif;color:#5b1814;
-                background:#f3c1bd;text-align:center;padding:2rem;">
-                <div style="font-size:1.1rem;font-weight:600;">Cytoscape not loaded</div>
-                <div style="font-size:0.82rem;color:#555;max-width:520px;line-height:1.6;">
+            <div class="boot-error">
+                <div class="boot-error-title">Cytoscape not loaded</div>
+                <div class="boot-error-msg">
                     The diagram library is missing. Make sure
                     <code>lib/cytoscape.min.js</code>,
                     <code>lib/dagre.min.js</code> and

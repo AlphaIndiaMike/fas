@@ -1568,7 +1568,7 @@ textarea.dlg-inp { font-family: 'Outfit', sans-serif; resize: vertical; }
 .res-fn { font-size: 0.72rem; font-weight: 600; color: #2c2c2a; }
 .res-el { color: #888; font-weight: 400; font-style: italic; }
 .res-nums { font-size: 0.7rem; color: #444441; margin-top: 2px; }
-.res-raw { color: #888; }
+.res-raw { font-size: 0.66rem; color: #888; }
 .res-cut { color: #27500A; font-weight: 600; margin-left: 4px; }
 .res-handled { font-size: 0.66rem; color: #639922; margin-top: 2px; }
 
@@ -1644,3 +1644,78 @@ textarea.dlg-inp { font-family: 'Outfit', sans-serif; resize: vertical; }
 .cc-card-ok .cc-src { color: #3B6D11; }
 .cc-link { cursor: pointer; text-decoration: underline dotted; }
 .cc-link:hover { color: var(--accent, #9a7c00); }
+
+/* ──────────────────────────────────────────────────────────────────
+   v2.7.6 — styles migrated out of inline `style=""` attributes.
+   Grouped by where they are used so the markup stays declarative and
+   the visual model lives here with the rest of the design tokens.
+   ────────────────────────────────────────────────────────────────── */
+
+/* Initial-hidden elements. Each is revealed at runtime by its
+   controller (it sets an explicit display), so this is only the
+   load-time default — the runtime show overrides it. */
+/* Centred derivation formula shown in the help / methodology copy. */
+.dlg-formula { text-align: center; }
+
+/* Canvas toolbar hint ("Click an event… · Drag to rearrange"). */
+.canvas-hint { font-size: 0.65rem; color: var(--text-dim); }
+
+/* FMEDA auto-connect option list (stacked checkboxes). */
+.fmeda-autoconnect { display: flex; flex-direction: column; gap: 6px; }
+
+/* Right-panel sub-heading that needs to clear the block above it. */
+.ctrl-section-hd--gap { margin-top: 12px; }
+
+/* Dialog vertical rhythm. Modifiers on the existing dialog blocks so a
+   label/note/hint can carry the right gap without an inline style. */
+.dlg-label--gap        { margin-top: 0.6rem; }
+.dlg-label--gap-sm     { margin-top: 0.4rem; }
+.dlg-note--flush       { margin-top: 0; }
+.dlg-hint--block       { margin: 0.2rem 0 0.4rem; }
+.dlg-hint--block-flush { margin: 0.2rem 0 0; }
+.dlg-hint--mb          { margin-bottom: 0.4rem; }
+.dlg-ro-row--divider {
+    border-top: 1px solid var(--border);
+    margin-top: 0.3rem;
+    padding-top: 0.3rem;
+}
+
+/* Transient "saved / exported" toast, created in JS by main.js. */
+.fas-flash {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    background: var(--bg-header);
+    color: var(--bg-panel);
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+    z-index: 9999;
+    max-width: 520px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+    display: none;
+}
+.fas-flash--show { display: block; }
+
+/* Fatal boot screen shown when the diagram library fails to load. */
+.boot-error {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    gap: 1rem;
+    font-family: 'Outfit', sans-serif;
+    color: var(--red);
+    background: var(--red-bg);
+    text-align: center;
+    padding: 2rem;
+}
+.boot-error-title { font-size: 1.1rem; font-weight: 600; }
+.boot-error-msg {
+    font-size: 0.82rem;
+    color: var(--text-mid);
+    max-width: 520px;
+    line-height: 1.6;
+}
