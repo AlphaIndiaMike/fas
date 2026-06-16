@@ -13,7 +13,7 @@ const CONFIG = {
        and stamped into exported reports / saved projects. BUMP THIS ON
        EVERY ITERATION of development — patch for fixes, minor for new
        features, major for breaking changes. */
-    appVersion:  '2.7.0',
+    appVersion:  '2.7.5',
     releaseDate: '2026-06-16',
 
     /* JSON file-format version. v2 added direct links; v3 was an earlier

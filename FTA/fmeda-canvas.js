@@ -51,6 +51,33 @@ const fmedaCanvas = (() => {
         (commonCause || []).forEach(f =>
             f.targets.forEach(t => ccTargetIds.add(t.eventId)));
 
+        // ── Integrity lens (mirror of the right-pane behaviour) ──────────
+        // The results panel reports under ONE scale — ASIL under the ISO
+        // 26262 lens, SIL under the IEC 61508 lens — and never the pair: a
+        // "SIL 4 / ASIL D" pairing reads as a false equivalence (an ASIL D
+        // element does not satisfy SIL 4). The canvas follows the same lens,
+        // so `bandFor` yields the active rate-band scale only.
+        const iso = (project.standard !== 'IEC61508');
+        const bandFor = pfh => iso ? fmt.asilForPfh(pfh) : fmt.silForPfh(pfh);
+        // What the canvas labels carry, per the methodology (see the v2.7.3
+        // changelog):
+        //   · a FAILURE MODE shows its FIT only — a mode is classified and
+        //     counted, it is NOT assigned an integrity level, so no band.
+        //   · a FUNCTION shows its residual FIT and the rate-band that rate
+        //     reaches (the informative per-function integrity; functions have
+        //     no SPFM/LFM of their own). Read from the residual roll-up.
+        //   · an ELEMENT shows ONLY its achieved integrity band, from
+        //     `fmedaElementBands`: a LEAF (low) element from its AGGREGATED
+        //     random-hardware metrics; a ROLL-UP (mid/top) element from those
+        //     same metrics aggregated over the leaves that feed it (so MAL_/
+        //     TAL_ reflect their subtree's real SPFM/LFM/PMHF, capped by Route
+        //     1ₕ — the system verdict, never an optimistic rate-only band).
+        //     The same map drives the right pane and the report. The element's
+        //     summed FIT is not shown (that detail lives in the right pane).
+        const roll   = project.fmedaRollup();
+        const fnRoll = {}; roll.functions.forEach(f => { fnRoll[f.id] = f; });
+        const elBands = project.fmedaElementBands(iso);
+
         // ── Deterministic absolute layout ────────────────────────────────
         // Compute every node's absolute (x,y) in one pass, top-down, so:
         //   · adding a function drops it into the NEXT free slot in its
@@ -115,12 +142,18 @@ const fmedaCanvas = (() => {
                 elOrigin[el.id] = (el.x || el.y)
                     ? { x: el.x - COL_W / 2, yTop: el.y - h / 2 }
                     : { x: colX, yTop: yCursor };
+                // Element headline: ONLY its achieved integrity band, in the
+                // active lens (leaf → aggregated metrics; mid/top → subtree
+                // aggregate). Empty elements are absent from the map → no band.
+                const elBand = elBands[el.id];
+                const elMetric = (elBand && elBand !== '—') ? elBand : '';
                 els.push({
                     group: 'nodes',
                     data: {
                         id:    el.id,
                         type:  'fmeda-element',
-                        label: el.id + '  ·  ' + el.name,
+                        label: el.id + '  ·  ' + el.name +
+                               (elMetric ? '\n' + elMetric : ''),
                         color: el.color,
                         level: el.level || '',
                         mit:   el.mitigation ? 1 : 0,
@@ -157,12 +190,21 @@ const fmedaCanvas = (() => {
                 fnOrigin[fn.id] = (fn.x || fn.y)
                     ? { x: fn.x - FN_W / 2, yTop: fn.y - h / 2 }
                     : { x, yTop: yCursor };
+                // Function headline: its residual FIT and the integrity band
+                // that rate reaches, in the active lens. A function with no
+                // failure modes has no roll-up entry, so it shows no line.
+                const fr = fnRoll[fn.id];
+                const fnMetric = fr
+                    ? fmt.fitStr(fr.residualFit) + ' · ' +
+                      bandFor(fr.residualFit * 1e-9)
+                    : '';
                 els.push({
                     group: 'nodes',
                     data: {
                         id:    fn.id,
                         type:  'fmeda-function',
-                        label: fn.id + '  ·  ' + fn.name,
+                        label: fn.id + '  ·  ' + fn.name +
+                               (fnMetric ? '\n' + fnMetric : ''),
                         color: fn.color,
                         netActive: activeNet === 'func' ? 1 : 0
                     },
@@ -213,20 +255,21 @@ const fmedaCanvas = (() => {
                 else if (handled && dc > 0) sub = 'DC ' + Math.round(dc * 100) + '%';
                 else if (handled)    sub = 'handled';
                 else                 sub = '';
-                // Severity: shade the node by the integrity band the
-                // mode's residual reaches — QM/No-SIL is the worst (bad),
-                // anything that clears a SIL band is ok. Unhandled leaves with
-                // a real residual read as a problem.
+                // Severity tint: shade the node by whether the dangerous mode
+                // is covered, and by the band its residual rate reaches — this
+                // is a graphical cue only (QM/No-SIL worst, a covered mode is
+                // ok). It is NOT a claim that the mode "has" that integrity.
                 const resFit = project.fmedaPropagatedResidual(e.id);
                 const band = fmt.asilForPfh(resFit * 1e-9);
                 const severity = !handled && resFit > 0
                     ? (band === 'QM' ? 'bad' : 'warn')
                     : 'ok';
-                // Achieved-metric line: residual FIT and the SIL/ASIL
-                // band it reaches, shown beneath the DC line. Rebuilt on every
-                // render, so it tracks edits and Recalculate.
-                const silB  = fmt.silForPfh(resFit * 1e-9);
-                const metricLine = fmt.fitStr(resFit) + ' · ' + silB + ' / ' + band;
+                // Metric line: the mode's residual FIT, and nothing more. A
+                // failure mode is classified and counted (FIT, DC), but it is
+                // NOT assigned a SIL/ASIL/QM integrity level — that belongs to
+                // the function and the element. So the band is shown there, not
+                // here. Rebuilt every render, so it tracks edits / Recalculate.
+                const metricLine = fmt.fitStr(resFit);
                 // Saved position wins (like FTA); unplaced ones stack under
                 // the placed siblings computed above.
                 const placed = (e.x || e.y);

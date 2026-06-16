@@ -675,9 +675,11 @@ const controls = (() => {
                           'D ≥ 99% · C ≥ 97% · B ≥ 90%')}
                     ${tgt('LFM — latent-fault metric', pct(t.lfm),
                           'D ≥ 90% · C ≥ 80% · B ≥ 60%')}
-                    <div class="res-m-verdict">${achieved === 'below ASIL B'
-                        ? 'Random-hardware metrics <strong>do not meet ASIL B</strong>, the lowest quantitative ASIL target — PMHF, SPFM or LFM is below the ASIL B threshold. (ASIL A, if required, is assigned qualitatively from the HARA, not from these metrics.)'
-                        : 'Meets the ISO 26262 random-hardware targets up to <strong>' + fmt.escHtml(achieved) + '</strong> — the highest ASIL whose PMHF, SPFM and LFM are <em>all</em> satisfied. This grades the random-hardware metrics only, not systematic capability or a HARA-assigned ASIL.'}</div>
+                    <div class="res-m-verdict">${/^ASIL [BCD]$/.test(achieved)
+                        ? 'Meets the ISO 26262 random-hardware targets up to <strong>' + fmt.escHtml(achieved) + '</strong> — the highest ASIL whose PMHF, SPFM and LFM are <em>all</em> satisfied. This grades the random-hardware metrics only, not systematic capability or a HARA-assigned ASIL.'
+                        : (achieved === 'ASIL A'
+                            ? 'Random-hardware metrics <strong>do not meet ASIL B</strong> (the lowest metric-gated ASIL); at this PMHF the item sits in the <strong>ASIL A</strong> band. ISO 26262-5 sets no quantitative SPFM/LFM target for ASIL A — confirm any ASIL A assignment via the HARA.'
+                            : 'Random-hardware metrics and PMHF do not reach any ASIL — <strong>QM</strong> (quality-managed only).')}</div>
                 </div>`;
         } else {
             const bandSil = fmt.silForPfh(t.lambdaDU * 1e-9);
@@ -714,6 +716,7 @@ const controls = (() => {
             metrics.elements.slice()
                 .sort((a, b) => (b.lambdaTotal || 0) - (a.lambdaTotal || 0))
                 .forEach(e => {
+                    const elBand = iso ? e.achievedAsil : e.achievedSil;
                     const tail = iso
                         ? `SPFM ${pct(e.spfm)} · LFM ${pct(e.lfm)}`
                         : `SFF ${pct(e.sff)} · Type ${fmt.escHtml(e.elementType || 'B')} · HFT ${e.hft || 0} · Route 1ₕ ${fmt.escHtml(e.route1hSil || '—')}`;
@@ -721,7 +724,7 @@ const controls = (() => {
                         <div class="res-fn">${fmt.escHtml(e.name)}
                             <span class="res-id">${fmt.escHtml(e.id || '')}</span>
                             ${e.level ? `<span class="res-lvl">${fmt.escHtml(e.level)}</span>` : ''}</div>
-                        <div class="res-pfh">λ ${fit(e.lambdaTotal)} FIT · ${tail}</div>
+                        <div class="res-pfh">λ ${fit(e.lambdaTotal)} FIT · ${tail}${elBand && elBand !== '—' ? ' → <strong>' + fmt.escHtml(elBand) + '</strong>' : ''}</div>
                     </div>`;
                 });
         }
@@ -783,20 +786,37 @@ const controls = (() => {
             html += _fmedaMetricsHtml(rollup.metrics, simple);
         }
 
+        // Per-element achieved band (leaf → aggregated metrics; mid/top →
+        // subtree aggregate), in the active lens — one source shared with the
+        // canvas and report.
+        const _proj = (cb.getProject && cb.getProject()) ? cb.getProject() : null;
+        const elBands = _proj ? _proj.fmedaElementBands(iso) : {};
+        // A chip from a band STRING (the achieved band). Same single-scale
+        // rule: ASIL under ISO, SIL under IEC.
+        const bandChipStr = (bandStr) => {
+            if (!bandStr || bandStr === '—') return '';
+            if (iso) {
+                const lbl = simple ? (CONFIG.simpleLabels.asil[bandStr] || bandStr) : bandStr;
+                return `<span class="ctrl-chip ctrl-chip-asil ${_asilClass(bandStr)}">${fmt.escHtml(lbl)}</span>`;
+            }
+            const lbl = simple ? (CONFIG.simpleLabels.sil[bandStr] || bandStr) : bandStr;
+            return `<span class="ctrl-chip ctrl-chip-sil ${_silClass(bandStr)}">${fmt.escHtml(lbl)}</span>`;
+        };
+
         // ── 1. Elements: achieved integrity ──────────────────────────
         if (rollup.elements && rollup.elements.length) {
             html += `<div class="res-section">Architecture elements</div>`;
+            html += `<div class="res-m-note">Leaf (low-level) elements show the <em>aggregated</em> random-hardware band (${iso ? 'PMHF · SPFM · LFM' : 'PFH band capped by Route 1<sub>H</sub>'}) over all their failure modes. Mid/top roll-up elements show those same metrics aggregated over the leaves that feed them (their subtree verdict).</div>`;
             rollup.elements.slice().sort((a, b) => a.integrityFit - b.integrityFit)
               .forEach(elr => {
-                const pfh = toPfh(elr.integrityFit);
+                const chip = bandChipStr(elBands[elr.id]);
                 html += `
                     <div class="res-card res-el-card">
                         <div class="res-fn">${fmt.escHtml(elr.name)}
                             <span class="res-id">${fmt.escHtml(elr.id)}</span>
                             ${elr.level ? `<span class="res-lvl">${fmt.escHtml(elr.level)}</span>` : ''}</div>
-                        <div class="res-levels">${bandChips(pfh)}</div>
-                        <div class="res-pfh">integrity ${fmt.pfhDualStr(pfh)} · total residual ${fitStr(elr.residualFit)}</div>
-                        ${qmRemark(pfh)}
+                        <div class="res-levels">${chip || '<span class="res-raw">no integrity yet</span>'}</div>
+                        <div class="res-pfh">total residual ${fitStr(elr.residualFit)}</div>
                     </div>`;
             });
         }
@@ -853,7 +873,7 @@ const controls = (() => {
                         <div class="res-fn"><span class="res-sr-id">${sr.srId}</span>
                             ${fmt.escHtml(sr.name)}
                             <span class="res-el">(${fmt.escHtml(sr.elementName)} · ${fmt.escHtml(sr.functionName)})</span></div>
-                        <div class="res-sr-mit">${fmt.escHtml(sr.mitigation)} <span class="res-raw">— DC ${Math.round(sr.dc * 100)}%</span></div>
+                        <div class="res-sr-mit">${fmt.escHtml(sr.mitigation)} <span class="res-raw">— ${sr.credited ? 'DC ' + Math.round(sr.dc * 100) + '%' : 'no diagnostic coverage credited yet'}</span></div>
                     </div>`;
             });
         }

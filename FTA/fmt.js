@@ -136,20 +136,23 @@ const fmt = (() => {
 
     /* Highest ASIL whose ISO 26262-5 hardware targets are ALL met by the
        achieved metrics: PMHF < target (/h) AND SPFM ≥ target AND LFM ≥ target.
-       Returns the ASIL string, or 'below ASIL B' when even ASIL B is not met,
-       or '—' when the metrics are unavailable. ASIL A is qualitative (no
-       quantitative target) so it is never *granted* here — a result that beats
-       nothing quantitatively is reported as 'below ASIL B', leaving the ASIL A
-       assignment to the HARA. SPFM/LFM are ignored when null (not computed). */
+       ASIL B/C/D are metric-gated. ISO 26262-5 sets NO quantitative SPFM/LFM
+       target for ASIL A or QM, so once the metrics fall short of ASIL B we
+       classify QM vs ASIL A from the achieved RATE (PMHF) — the data we already
+       have — via the asilBands ladder, capped at ASIL A since the metrics do
+       not support ASIL B or above. Returns an ASIL string, 'QM', or '—' when
+       the metrics are unavailable. SPFM/LFM are ignored when null (not
+       computed). ASIL A from rate is informative (no metric target) and the UI
+       marks it '*' — the final ASIL A vs QM call belongs to the HARA. */
     function asilFromMetrics(pmhfPerH, spfm, lfm) {
         if (pmhfPerH == null || isNaN(pmhfPerH)) return '—';
         for (const t of CONFIG.iso26262Targets) {
             const pmhfOk = pmhfPerH < t.pmhf;
             const spfmOk = (spfm == null) || (spfm >= t.spfm);
             const lfmOk  = (lfm  == null) || (lfm  >= t.lfm);
-            if (pmhfOk && spfmOk && lfmOk) return t.asil;
+            if (pmhfOk && spfmOk && lfmOk) return t.asil;   // B/C/D, metric-gated
         }
-        return 'below ASIL B';
+        return (asilForPfh(pmhfPerH) === 'QM') ? 'QM' : 'ASIL A';
     }
 
     /* The ISO 26262 target row for one ASIL (or null). */
@@ -199,6 +202,27 @@ const fmt = (() => {
         if (ra < 0) return b;
         if (rb < 0) return a;
         return ra <= rb ? a : b;
+    }
+
+    /* Achieved integrity band from an AGGREGATED FMEDA metrics object — the
+       integrity an element (or the whole item) earns from its random-hardware
+       metrics, per the active standard. This is the standard-correct basis: it
+       is computed over ALL of the unit's failure modes, NOT inferred from a
+       single "best" function.
+         ISO 26262: the highest ASIL whose PMHF, SPFM and LFM are ALL met
+           (asilFromMetrics) for B/C/D; below that, QM or ASIL A from the rate.
+         IEC 61508: the claimable SIL = the lower of the PFH-band SIL (from the
+           residual dangerous-undetected rate λ_DU) and the Route 1ₕ
+           architectural cap (silMin).
+       Pure: a read of the metrics object only, no model state. `m` is a
+       metrics row from Project.fmedaMetrics() (an element or the `total`). */
+    function achievedBand(m, iso) {
+        if (!m) return iso ? '—' : 'No SIL';
+        if (iso) {
+            return asilFromMetrics((m.lambdaSPF + m.lambdaRF) * 1e-9, m.spfm, m.lfm);
+        }
+        const bandSil = silForPfh(m.lambdaDU * 1e-9);
+        return (m.route1hSil == null) ? bandSil : silMin(bandSil, m.route1hSil);
     }
 
     /* Stored fraction → percent string for an EDITABLE input field.
@@ -298,6 +322,6 @@ const fmt = (() => {
         pctStr, pctInputVal, intDot, inHoursStr,
         sciStr, oneInN,
         pfhDualStr, silForPfh, asilForPfh, asilFromMetrics, iso26262TargetFor,
-        route1hMaxSil, sffBandLabel, silRank, silMin
+        route1hMaxSil, sffBandLabel, silRank, silMin, achievedBand
     };
 })();

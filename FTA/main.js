@@ -249,6 +249,11 @@ const main = (() => {
             b.classList.toggle('on', b.getAttribute('data-standard') === s);
         });
         controls.setStandard(s);
+        // The FMEDA canvas now shows each function's/element's integrity in the
+        // ACTIVE lens only (ASIL or SIL, never both), so a lens switch must
+        // repaint the diagram too — not just the right pane. Node positions are
+        // persisted, so this re-render moves nothing.
+        if (project && project.mode === 'FMEDA') canvas.render(project);
         _unsaved = true;
         controls.markDirty();
     }

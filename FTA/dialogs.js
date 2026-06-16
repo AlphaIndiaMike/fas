@@ -372,7 +372,9 @@ const dialogs = (() => {
         const res = p.fmedaPropagatedResidual(existing.id);
         const dc  = p.fmedaComputedDC(existing.id);
         const pfh = res * 1e-9;
-        const sil = fmt.silForPfh(pfh), asil = fmt.asilForPfh(pfh);
+        // Single active-lens band (no "SIL / ASIL" pair — that false
+        // equivalence is avoided everywhere the tool reports integrity).
+        const band = (p.standard !== 'IEC61508') ? fmt.asilForPfh(pfh) : fmt.silForPfh(pfh);
         if (!(raw > 0)) {
             return `<div class="dlg-note">No contributing failure modes are
                 linked to this effect yet. Link the lower-level failure modes
@@ -384,7 +386,7 @@ const dialogs = (() => {
                 <div class="dlg-ro-row"><span>Incoming rate (before mitigation)</span><strong>${fmt.fitStr(raw)}</strong></div>
                 <div class="dlg-ro-row"><span>Residual rate</span><strong>${fmt.fitStr(res)}</strong></div>
                 <div class="dlg-ro-row"><span>Diagnostic coverage</span><strong>${Math.round(dc * 100)}%</strong></div>
-                <div class="dlg-ro-row"><span>Achieved integrity</span><strong>${fmt.pfhDualStr(pfh)} · ${sil} / ${asil}</strong></div>
+                <div class="dlg-ro-row"><span>Achieved integrity</span><strong>${fmt.pfhDualStr(pfh)} · ${band}</strong></div>
                 <div class="dlg-note" style="margin-top:.5rem">Determined by the
                     contributing lower-level failure modes and their mitigations.
                     Strengthen the diagnostics on those failure modes to improve
@@ -762,8 +764,13 @@ const dialogs = (() => {
             const lamD = lamMode * dang, lamS = lamMode * (1 - dang);
             const lamDD = lamD * dc1,   lamDU = lamD * (1 - dc1);
             const pfh = lamDU * 1e-9;
-            const sil = fmt.silForPfh(pfh), asil = fmt.asilForPfh(pfh);
-            const star = (asil === 'ASIL A') ? '*' : '';
+            // Single active-lens band — the residual rate this leaf contributes,
+            // mapped to the active scale (no SIL/ASIL pair). This is a live
+            // computation trace; the integrity VERDICT is rolled up to the
+            // function and element, not claimed for the individual mode.
+            const isoLens = (project.standard !== 'IEC61508');
+            const band = isoLens ? fmt.asilForPfh(pfh) : fmt.silForPfh(pfh);
+            const star = (band === 'ASIL A') ? '*' : '';
             live.innerHTML =
                 'λ<sub>mode</sub> = ' + fmt.fitStr(lamMode) +
                 ' · λ<sub>D</sub> = ' + fmt.fitStr(lamD) +
@@ -771,7 +778,7 @@ const dialogs = (() => {
                 '<br>λ<sub>DD</sub> = ' + fmt.fitStr(lamDD) +
                 ' · residual λ<sub>DU</sub> = <strong>' + fmt.fitStr(lamDU) + '</strong>' +
                 ' · PFH = ' + fmt.perHourStr(pfh) +
-                '<br>integrity <strong>' + sil + ' / ' + asil + star + '</strong>';
+                '<br>residual reaches <strong>' + band + star + '</strong> (rolled up to its function / element)';
             return;
         }
         // FTA/ETA: PFD / PFH from the chosen mode.
@@ -1701,20 +1708,15 @@ const dialogs = (() => {
             const m = sel ? sel.value : 'FTA';
             return ['FTA', 'ETA', 'FMEDA'].includes(m) ? m : 'FTA';
         };
-        // Reference variant — only meaningful for FMEDA, which ships two
-        // worked examples (the ASIL-C pass and the QM calibration case).
-        // Other modes ignore it (their builder takes no variant).
-        const pickedVariant = () => {
-            const sel = document.getElementById('fRef');
-            return (sel && pickedMode() === 'FMEDA') ? sel.value : null;
-        };
         const footer = [];
         if (typeof onDemo === 'function') {
             footer.push({
                 label: 'Load reference', cls: 'btn-sec btn-left',
                 onClick: () => {
-                    const m = pickedMode(), v = pickedVariant();
-                    modal.close(); onDemo(m, v);
+                    const m = pickedMode();
+                    // FMEDA has one canonical reference: the worked brake-by-wire
+                    // model that exercises every feature and is correct end-to-end.
+                    modal.close(); onDemo(m, m === 'FMEDA' ? 'pass' : null);
                 }
             });
         }
@@ -1741,17 +1743,6 @@ const dialogs = (() => {
                 'Pick the kind of analysis. <strong>Load reference</strong> opens a ' +
                 'worked example of this type to learn from or build on; ' +
                 '<strong>Create</strong> starts an empty one. You can switch type later.')}
-            <div id="fRefRow" style="display:none">
-            ${_field('Reference example',
-                `<select class="dlg-inp" id="fRef">
-                    <option value="pass">Worked example — meets ASIL C (random-hardware metrics)</option>
-                    <option value="">Calibration — an uncovered fault stays QM</option>
-                </select>`,
-                'Which FMEDA reference <strong>Load reference</strong> opens. The worked ' +
-                'example is a fully-covered design whose metrics roll up to a clean ' +
-                'ASIL C; the calibration case keeps one uncovered single-point fault, ' +
-                'so it stays QM on purpose. (No effect on <strong>Create</strong>.)')}
-            </div>
             ${_field('Project name',
                 `<input class="dlg-inp" id="fName" type="text" maxlength="60" placeholder="e.g. Brake-by-wire FTA">`)}
             ${_field('Mission time preset',
@@ -1774,14 +1765,6 @@ const dialogs = (() => {
         if (sel) sel.addEventListener('change', () => {
             if (sel.value) inp.value = sel.value;
         });
-        // Reveal the FMEDA reference-variant picker only for FMEDA.
-        const modeSel = document.getElementById('fMode');
-        const refRow  = document.getElementById('fRefRow');
-        const syncRefRow = () => {
-            if (refRow) refRow.style.display = (modeSel && modeSel.value === 'FMEDA') ? '' : 'none';
-        };
-        if (modeSel) modeSel.addEventListener('change', syncRefRow);
-        syncRefRow();
         // Pre-select preset if current value matches one.
         if (sel && inp) {
             const match = CONFIG.missionTimePresets.find(p => +p.hours === +inp.value);
@@ -1862,7 +1845,15 @@ const dialogs = (() => {
     function _fmedaReportLines(lines, p) {
         const ru = p.fmedaRollup();
         const pfhStr = fit => fmt.pfhDualStr(fit * 1e-9);
+        // The report documents the project under its SELECTED integrity lens
+        // (the standard is saved on the file), the same single scale the canvas
+        // and right pane show — never a "SIL n / ASIL n" pair (a false
+        // equivalence). The full λ / SFF / SPFM / LFM metrics below are listed
+        // regardless of lens, as data; only the integrity VERDICTS follow it.
+        const iso = (p.standard !== 'IEC61508');
+        const bandRate = fit => iso ? fmt.asilForPfh(fit * 1e-9) : fmt.silForPfh(fit * 1e-9);
         lines.push('Mode: FMEDA · Mission time: ' + p.missionTime + ' h');
+        lines.push('Integrity lens: ' + (iso ? 'ISO 26262 (ASIL)' : 'IEC 61508 (SIL)'));
         lines.push('');
 
         // Hardware metrics — IEC 61508 SFF and ISO 26262 SPF/RF/MPF.
@@ -1899,26 +1890,32 @@ const dialogs = (() => {
         }
         lines.push('');
 
-        // Elements — achieved integrity.
+        // Elements — achieved integrity. Leaf elements: their aggregated random-
+        // hardware band. Mid/top roll-ups: the same metrics aggregated over the
+        // leaves that feed them (their subtree verdict). One source
+        // (fmedaElementBands) so the report matches the canvas and right pane.
         lines.push('## Architecture elements (' + ru.elements.length + ')');
         if (!ru.elements.length) lines.push('- None yet.');
+        const elBands = p.fmedaElementBands(iso);
+        const metById = {};
+        m.elements.forEach(e => { if (e.id) metById[e.id] = e; });
         ru.elements.slice().sort((a, b) => a.integrityFit - b.integrityFit).forEach(e => {
-            const pfh = e.integrityFit * 1e-9;
+            const leaf = !!metById[e.id];
+            const band = elBands[e.id] || '—';
             lines.push('- [' + e.id + '] ' + e.name +
                 (e.level ? ' (' + e.level + ')' : '') +
-                ' — integrity ' + fmt.silForPfh(pfh) + ' / ' + fmt.asilForPfh(pfh) +
-                ' at ' + pfhStr(e.integrityFit) +
-                '; total residual ' + fmt.fitStr(e.residualFit));
+                ' — achieved integrity ' + band +
+                '; total residual ' + fmt.fitStr(e.residualFit) +
+                (leaf ? '' : ' (roll-up — subtree aggregate)'));
         });
         lines.push('');
 
-        // Functions — residual & integrity.
+        // Functions — residual & integrity (rate-band, active lens).
         lines.push('## Functions (' + ru.functions.length + ')');
         ru.functions.forEach(f => {
-            const pfh = f.residualFit * 1e-9;
             lines.push('- [' + f.id + '] ' + f.name + '  (' + f.elementName + ')');
             lines.push('   - Residual: ' + fmt.fitStr(f.residualFit) + ' = ' + pfhStr(f.residualFit) +
-                '  →  ' + fmt.silForPfh(pfh) + ' / ' + fmt.asilForPfh(pfh));
+                '  →  ' + bandRate(f.residualFit));
             lines.push('   - Raw: ' + fmt.fitStr(f.rawFit) +
                 ' · handled ' + f.handledCount + '/' + f.total +
                 (f.derivedCount ? ' · derived ' + f.derivedCount : ''));
@@ -1946,11 +1943,13 @@ const dialogs = (() => {
         // Safety requirements — the traceable SRn list.
         const srs = p.safetyRequirements();
         lines.push('## Safety requirements (' + srs.length + ')');
-        if (!srs.length) lines.push('- None. A requirement is created for each handled (mitigated) low-level failure mode.');
+        if (!srs.length) lines.push('- None. A requirement is listed for each low-level failure mode that has a written mitigation.');
         srs.forEach(sr => {
             lines.push('- ' + sr.srId + ' [' + sr.eventId + '] — ' + sr.elementName +
                 ' · ' + sr.functionName + ' · ' + sr.name);
-            lines.push('   - DC ' + Math.round(sr.dc * 100) + '% — ' + sr.mitigation);
+            lines.push('   - ' + (sr.credited ? 'DC ' + Math.round(sr.dc * 100) + '%'
+                                              : 'no diagnostic coverage credited yet') +
+                ' — ' + sr.mitigation);
         });
         lines.push('');
 

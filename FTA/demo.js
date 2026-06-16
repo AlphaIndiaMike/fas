@@ -13,7 +13,8 @@
  *                                     unknown/blank → FMEDA for back-compat)
  *   demo.buildFTA()    -> Project   (single-top fault tree)
  *   demo.buildETA()    -> Project   (one initiating event → several finals)
- *   demo.buildFMEDA()  -> Project   (architecture / function / failure nets)
+ *   demo.buildFMEDApass() -> Project (architecture / function / failure nets;
+ *                                     the worked ASIL-C brake-by-wire model)
  *   demo.modes()       -> ['FTA','ETA','FMEDA']
  *
  * Built through the public Project API so ids and the auto-layout behave
@@ -169,110 +170,11 @@ const demo = (function () {
     }
 
     /* ═══════════════════════════════════════════════════════════════
-       FMEDA — a brake-by-wire controller. Exercises every FMEDA path:
-         · all three architecture levels (top/mid/low), functions, modes
-         · leaf failure modes in every input mode (coverage, rate, PFD)
-         · safe rates so SFF/SPFM are real; latent coverage so LFM is real
-         · handled vs unhandled modes; derived effects at mid/top
-         · OR and AND convergence (redundant sensors); a common cause
-         · safety requirements on the handled leaves
-       The 50 % Sensor-A mode is a deliberate must-stay-QM calibration case.
-       ═══════════════════════════════════════════════════════════════ */
-    function buildFMEDA() {
-        const p = new Project('');           // untitled — user names it
-        p.setMode('FMEDA');
-        p.missionTime = 10000;               // h — reference automotive mission time
-
-        // ── Low-level elements (the leaves where rates are entered) ──
-        const mcu = p.addGroup({ name: 'MCU', kind: 'element', level: 'low' });
-        const mcuFn = p.addGroup({ name: 'Execute control loop', kind: 'function', parentId: mcu.id });
-        const ram = p.addEvent({ name: 'RAM bit flip', kind: 'basic', groupId: mcuFn.id });
-        p.updateEvent(ram.id, {
-            probMode: 'coverage', failureRateRaw: 200, diagnosticCoverage: 0.92,
-            diagnosticCoverageLatent: 0.6, failureRateSafe: 1800,
-            mitigation: 'ECC on RAM; uncorrectable error forces the safe state within 10 ms.',
-            diagnosticEvidence: 'ISO 26262-5:2018 Annex D, Table D.4 (EDC/ECC).'
-        });
-        const alu = p.addEvent({ name: 'ALU stuck-at fault', kind: 'basic', groupId: mcuFn.id });
-        p.updateEvent(alu.id, { probMode: 'rate', failureRate: 60 });   // unhandled
-
-        const pwr = p.addGroup({ name: 'Power Supply', kind: 'element', level: 'low' });
-        const pwrFn = p.addGroup({ name: 'Provide regulated rail', kind: 'function', parentId: pwr.id });
-        const ov = p.addEvent({ name: 'Overvoltage', kind: 'basic', groupId: pwrFn.id });
-        p.updateEvent(ov.id, {
-            probMode: 'direct', directUnit: 'PFD', probability: 0.02,   // 2 %
-            diagnosticCoverage: 0.9, failureRateSafe: 800,
-            mitigation: 'Independent over-voltage comparator disables the rail and signals fault.'
-        });
-        const loss = p.addEvent({ name: 'Total loss of supply', kind: 'basic', groupId: pwrFn.id });
-        p.updateEvent(loss.id, {
-            probMode: 'rate', failureRate: 80, diagnosticCoverage: 0.99,
-            diagnosticCoverageLatent: 0.5, failureRateSafe: 720,
-            mitigation: 'Redundant LDO with cross-monitoring; loss is detected and annunciated.'
-        });
-
-        const senA = p.addGroup({ name: 'Pedal Sensor A', kind: 'element', level: 'low' });
-        const senAFn = p.addGroup({ name: 'Sense pedal (A)', kind: 'function', parentId: senA.id });
-        const implA = p.addEvent({ name: 'Implausible reading', kind: 'basic', groupId: senAFn.id });
-        // Deliberately catastrophic 50 % case — MUST remain Quality-Managed (QM).
-        p.updateEvent(implA.id, { probMode: 'direct', directUnit: 'PFD', probability: 0.5 });
-
-        const senB = p.addGroup({ name: 'Pedal Sensor B', kind: 'element', level: 'low' });
-        const senBFn = p.addGroup({ name: 'Sense pedal (B)', kind: 'function', parentId: senB.id });
-        const implB = p.addEvent({ name: 'Implausible reading', kind: 'basic', groupId: senBFn.id });
-        p.updateEvent(implB.id, {
-            probMode: 'rate', failureRate: 40, diagnosticCoverage: 0.7,
-            failureRateSafe: 360,
-            mitigation: 'Range and rate-of-change plausibility check on the channel.'
-        });
-
-        // ── Mid-level element (derived effects, computed bottom-up) ──
-        const ecu = p.addGroup({ name: 'Brake ECU', kind: 'element', level: 'mid' });
-        const cmdFn = p.addGroup({ name: 'Form brake command', kind: 'function', parentId: ecu.id });
-        const erroneous = p.addEvent({ name: 'Erroneous brake command', kind: 'basic', groupId: cmdFn.id });
-        const mcuEffect = p.addEvent({ name: 'Controller fault propagates', kind: 'basic', groupId: cmdFn.id });
-        const availFn = p.addGroup({ name: 'Maintain command availability', kind: 'function', parentId: ecu.id });
-        const noCmd = p.addEvent({ name: 'No brake command', kind: 'basic', groupId: availFn.id });
-
-        // ── Top-level element (system effect) ──
-        const sys = p.addGroup({ name: 'Brake-by-Wire System', kind: 'element', level: 'top' });
-        const brakeFn = p.addGroup({ name: 'Deliver braking torque', kind: 'function', parentId: sys.id });
-        const lossBraking = p.addEvent({ name: 'Loss of braking torque', kind: 'basic', groupId: brakeFn.id });
-
-        // ── Failure network (causation) ──
-        // Redundant sensors → AND convergence (cross-check defeats one fault).
-        p.addNetEdge({ net: 'fail', from: implA.id, to: erroneous.id });
-        p.addNetEdge({ net: 'fail', from: implB.id, to: erroneous.id });
-        p.setFailGate(erroneous.id, 'AND');
-
-        // Controller faults → OR convergence.
-        p.addNetEdge({ net: 'fail', from: ram.id, to: mcuEffect.id });
-        p.addNetEdge({ net: 'fail', from: alu.id, to: mcuEffect.id });
-
-        // Loss of the rail → no command → OR convergence.
-        p.addNetEdge({ net: 'fail', from: ov.id,   to: noCmd.id });
-        p.addNetEdge({ net: 'fail', from: loss.id, to: noCmd.id });
-
-        // System loss of braking: any mid-level effect → OR convergence.
-        p.addNetEdge({ net: 'fail', from: erroneous.id, to: lossBraking.id });
-        p.addNetEdge({ net: 'fail', from: mcuEffect.id, to: lossBraking.id });
-        p.addNetEdge({ net: 'fail', from: noCmd.id,     to: lossBraking.id });
-
-        // Common cause: the ALU fault also drives the top effect directly.
-        p.addNetEdge({ net: 'fail', from: alu.id, to: lossBraking.id });
-
-        return p;
-    }
-
-    /* ═══════════════════════════════════════════════════════════════
-       FMEDA (worked PASS) — the same brake-by-wire controller, but as a
-       design that actually MEETS a quantitative ISO 26262 target. Where
-       buildFMEDA() is the deliberate must-stay-QM calibration case (one
-       uncovered 50 % single-point fault sinks the whole element), this is
-       its counterpart: every dangerous mode is covered by a documented
-       safety mechanism, every channel carries a safe rate, and the latent
-       checks are modelled — so the random-hardware metrics roll up to a
-       clean, honest result.
+       FMEDA (worked PASS) — the same brake-by-wire controller, built as a
+       design that MEETS a quantitative ISO 26262 target. This is the single
+       FMEDA reference offered in the UI (Load reference). The earlier
+       must-stay-QM calibration model is no longer shipped; it lives in the
+       test suite as a fixture.
 
        Verified result (mission time 10 000 h, leaf roll-up):
          · λ_DU ≈ 18.5 FIT  → PMHF ≈ 1.85 × 10⁻⁸ /h
@@ -286,7 +188,7 @@ const demo = (function () {
            (the SFF / HFT Route 1ₕ architectural constraint is, as noted in
            the panel, not yet modelled — SFF is shown for reference).
 
-       Exercises every FMEDA path, like the calibration model: all three
+       Exercises every FMEDA path: all three
        levels, functions, leaves in every input mode (coverage / rate /
        direct PFD), real safe rates (so SFF/SPFM are off the floor), latent
        coverage (so LFM is real), handled modes with written safety
@@ -399,22 +301,23 @@ const demo = (function () {
         return p;
     }
 
-    const BUILDERS = { FTA: buildFTA, ETA: buildETA, FMEDA: buildFMEDA };
+    const BUILDERS = { FTA: buildFTA, ETA: buildETA, FMEDA: buildFMEDApass };
 
     /* Default to FMEDA when the mode is unknown/blank, so the historical
-       demo.build() call (and any ≤2.4 saved expectation) is unchanged.
-       The optional `variant` selects an alternative reference for a mode;
-       today only FMEDA has one ('pass' → the worked ASIL-C example).
-       Unknown variants fall through to the mode default. */
+       demo.build() call (and any ≤2.4 saved expectation) still resolves. The
+       FMEDA reference is the worked brake-by-wire model (buildFMEDApass) — the
+       single reference offered in the UI; it exercises every feature and rolls
+       up to a clean ASIL C. `variant` is accepted for call-site compatibility
+       but no longer selects an alternative model (the QM calibration case is
+       now a test-suite fixture, not shipped). */
     function build(mode, variant) {
-        if (mode === 'FMEDA' && variant === 'pass') return buildFMEDApass();
-        const fn = BUILDERS[mode] || buildFMEDA;
+        const fn = BUILDERS[mode] || buildFMEDApass;
         return fn();
     }
 
     function modes() { return ['FTA', 'ETA', 'FMEDA']; }
 
-    return { build, buildFTA, buildETA, buildFMEDA, buildFMEDApass, modes };
+    return { build, buildFTA, buildETA, buildFMEDApass, modes };
 })();
 
 if (typeof module !== 'undefined' && module.exports) module.exports = { demo };

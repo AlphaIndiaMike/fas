@@ -689,26 +689,8 @@ class Project {
             if (this.fmedaIsDerived(e.id)) return;             // leaves only
             const fn = this.groupById(e.groupId);
             if (!fn || fn.kind !== 'function') return;
-            const lamD = this.fmedaRawFit(e);                  // dangerous rate
-            const lamS = this.fmedaSafeFit(e);                 // safe rate λ_S (derived)
-            if (!(lamD > 0) && !(lamS > 0)) return;            // nothing to count
-            const dc1 = fmt.clamp(e.diagnosticCoverage, 0, 1, 0);
-            const dc2 = fmt.clamp(e.diagnosticCoverageLatent, 0, 1, 0);
-            const hasSM = dc1 > 0;
-            const contrib = {
-                lambdaTotal: lamD + lamS,
-                // Safe failures are credited as safe regardless of any safe
-                // diagnostic, so the whole λ_S sits in λ_SU (no safe-detected
-                // split is modelled — it would not change SFF/SPFM/LFM).
-                lambdaSD: 0, lambdaSU: lamS,
-                lambdaDD: lamD * dc1,
-                lambdaDU: lamD * (1 - dc1),
-                lambdaSPF: hasSM ? 0 : lamD,
-                lambdaRF:  hasSM ? lamD * (1 - dc1) : 0,
-                lambdaMPFdp:     lamD * dc1,
-                lambdaMPFlatent: lamD * dc1 * (1 - dc2),
-                count: 1
-            };
+            const contrib = this._fmedaLeafContribution(e);
+            if (!contrib) return;                              // nothing to count
             const el = this.elementOf(fn.id);
             const elId = el ? el.id : '__none__';
             if (!byEl.has(elId)) {
@@ -735,6 +717,14 @@ class Project {
             // IEC 61508-2 Route 1ₕ architectural cap from this element's SFF,
             // type and HFT (per-element only; the total is an aggregate).
             if (isElement) a.route1hSil = fmt.route1hMaxSil(a.elementType, a.sff, a.hft);
+            // Achieved integrity per standard, from these AGGREGATED metrics —
+            // the standard-correct element/item band (NOT a single function's).
+            // ISO uses PMHF/SPFM/LFM; IEC uses the claimable SIL (PFH band
+            // capped by Route 1ₕ). The TOTAL's IEC cap is the system limiter,
+            // assigned by the caller below, so its `achievedSil` is stamped
+            // there; the ASIL has no such dependency and is stamped here.
+            a.achievedAsil = fmt.achievedBand(a, true);
+            if (isElement) a.achievedSil = fmt.achievedBand(a, false);
             return a;
         };
         finalize(total, false);
@@ -750,7 +740,121 @@ class Project {
         });
         total.route1hSil     = cap;       // null when no element has a computed SFF
         total.route1hLimiter = limiter;
+        // The system claimable SIL depends on the limiter cap just computed.
+        total.achievedSil = fmt.achievedBand(total, false);
         return { total, elements };
+    }
+
+    /* The random-hardware contribution of ONE leaf failure mode, or null when
+       it carries no rate. Shared by fmedaMetrics (per-element / total) and the
+       roll-up subtree aggregation below, so both count a leaf identically. */
+    _fmedaLeafContribution(e) {
+        const lamD = this.fmedaRawFit(e);                  // dangerous rate
+        const lamS = this.fmedaSafeFit(e);                 // safe rate λ_S
+        if (!(lamD > 0) && !(lamS > 0)) return null;
+        const dc1 = fmt.clamp(e.diagnosticCoverage, 0, 1, 0);
+        const dc2 = fmt.clamp(e.diagnosticCoverageLatent, 0, 1, 0);
+        const hasSM = dc1 > 0;
+        return {
+            lambdaTotal: lamD + lamS,
+            // λ_S is credited as safe regardless of any safe diagnostic, so the
+            // whole λ_S sits in λ_SU (no safe-detected split is modelled).
+            lambdaSD: 0, lambdaSU: lamS,
+            lambdaDD: lamD * dc1,
+            lambdaDU: lamD * (1 - dc1),
+            lambdaSPF: hasSM ? 0 : lamD,
+            lambdaRF:  hasSM ? lamD * (1 - dc1) : 0,
+            lambdaMPFdp:     lamD * dc1,
+            lambdaMPFlatent: lamD * dc1 * (1 - dc2),
+            count: 1
+        };
+    }
+
+    /* The LEAF failure-mode ids whose failures reach any mode of `elementId`
+       through the fail net. A low element resolves to its own leaves (its
+       modes are leaves, not derived, so the walk stops at them); a mid/top
+       roll-up resolves to every leaf that feeds its derived modes, transitively
+       (cycle-safe via `seen`). Used to give a roll-up element a band from the
+       AGGREGATED metrics of its subtree, not a rate-only band. */
+    fmedaElementLeaves(elementId) {
+        if (this.mode !== 'FMEDA') return [];
+        const leaves = new Set();
+        const seen = new Set();
+        const visit = (modeId) => {
+            if (seen.has(modeId)) return;
+            seen.add(modeId);
+            if (!this.fmedaIsDerived(modeId)) { leaves.add(modeId); return; }
+            this.failIncoming(modeId).forEach(ed => visit(ed.from));
+        };
+        this.events.forEach(e => {
+            if (e.kind !== 'basic' || !e.groupId) return;
+            const el = this.elementOf(e.groupId);
+            if (el && el.id === elementId) visit(e.id);
+        });
+        return Array.from(leaves);
+    }
+
+    /* Aggregate the random-hardware metrics of a set of leaf modes into one
+       metrics row (the same SFF / SPFM / LFM finalisation fmedaMetrics uses),
+       optionally carrying a Route 1ₕ cap. Used for roll-up element bands. */
+    _fmedaAggregateLeaves(leafIds, route1hCap) {
+        const a = {
+            lambdaTotal: 0, lambdaSD: 0, lambdaSU: 0, lambdaDD: 0, lambdaDU: 0,
+            lambdaSPF: 0, lambdaRF: 0, lambdaMPFdp: 0, lambdaMPFlatent: 0, count: 0
+        };
+        leafIds.forEach(id => {
+            const e = this.eventById(id);
+            const c = e ? this._fmedaLeafContribution(e) : null;
+            if (c) Object.keys(c).forEach(k => { a[k] += c[k]; });
+        });
+        const rf = a.lambdaSPF + a.lambdaRF;
+        a.sff  = a.lambdaTotal > 0 ? (a.lambdaSD + a.lambdaSU + a.lambdaDD) / a.lambdaTotal : null;
+        a.spfm = a.lambdaTotal > 0 ? 1 - rf / a.lambdaTotal : null;
+        const mpfBase = a.lambdaTotal - rf;
+        a.lfm  = mpfBase > 0 ? 1 - a.lambdaMPFlatent / mpfBase : null;
+        a.route1hSil = (route1hCap == null) ? null : route1hCap;
+        return a;
+    }
+
+    /* Achieved integrity band per architecture element, in the active lens
+       (iso=true → ASIL, false → SIL), as a map { elementId: bandString }.
+         · LEAF (low) elements: their own aggregated random-hardware band.
+         · ROLL-UP (mid/top) elements: the SAME metrics aggregated over the
+           leaves that feed them through the fail net, so they reflect the real
+           SPFM/LFM/PMHF of their subtree (e.g. the top element reads the system
+           verdict), capped by the most-limiting Route 1ₕ among those leaves'
+           elements — never an optimistic rate-only band.
+         · empty elements (no contributing leaves): omitted (no band to show).
+       One source so the canvas, the right pane and the report all agree. */
+    fmedaElementBands(iso) {
+        const out = {};
+        if (this.mode !== 'FMEDA') return out;
+        const met = this.fmedaMetrics();
+        const byId = {}; met.elements.forEach(m => { if (m.id) byId[m.id] = m; });
+        this.elementGroups().forEach(el => {
+            if (byId[el.id]) {                       // low element: own metrics
+                out[el.id] = fmt.achievedBand(byId[el.id], iso);
+                return;
+            }
+            const leaves = this.fmedaElementLeaves(el.id);
+            if (!leaves.length) return;              // empty → no band
+            // Architectural cap = the most limiting Route 1ₕ among the low
+            // elements that own these subtree leaves.
+            let cap = null;
+            const owners = new Set();
+            leaves.forEach(id => {
+                const e = this.eventById(id);
+                const o = (e && e.groupId) ? this.elementOf(e.groupId) : null;
+                if (o) owners.add(o.id);
+            });
+            owners.forEach(oid => {
+                const r = byId[oid] && byId[oid].route1hSil;
+                if (r && r !== '—' && (cap == null || fmt.silRank(r) < fmt.silRank(cap))) cap = r;
+            });
+            const agg = this._fmedaAggregateLeaves(leaves, cap);
+            if (agg.count > 0) out[el.id] = fmt.achievedBand(agg, iso);
+        });
+        return out;
     }
 
     /* ── FMEDA net edges ──────────────────────────────────────────────
@@ -869,16 +973,23 @@ class Project {
         const rows = [];
         this.events.forEach(e => {
             if (e.kind !== 'basic' || !e.groupId) return;
-            if (!this.fmedaIsHandled(e)) return;        // only handled FMs
+            // A safety requirement is the written safety mechanism. List it as
+            // soon as it is written — whether or not a diagnostic coverage has
+            // been credited yet — so a freshly-added mitigation always appears
+            // (the DC>0 "handled" state only governs residual credit/colour).
+            const hasMit = !!(e.mitigation && e.mitigation.trim());
+            if (!hasMit) return;
             if (this.fmedaIsDerived(e.id)) return;      // mitigation lives at leaf level
             const fn = this.groupById(e.groupId);
             if (!fn || fn.kind !== 'function') return;
             const el = this.elementOf(fn.id);
+            const dc = +e.diagnosticCoverage || 0;
             rows.push({
                 eventId:      e.id,
                 name:         e.name,
                 mitigation:   (e.mitigation || '').trim(),
-                dc:           +e.diagnosticCoverage || 0,
+                dc:           dc,
+                credited:     dc > 0,           // DC credited (handled) vs written-only
                 functionId:   fn.id,
                 functionName: fn.name,
                 elementId:    el ? el.id : null,
