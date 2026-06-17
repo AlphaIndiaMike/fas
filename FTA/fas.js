@@ -816,28 +816,54 @@ class Project {
         return a;
     }
 
-    /* Achieved integrity band per architecture element, in the active lens
-       (iso=true → ASIL, false → SIL), as a map { elementId: bandString }.
-         · LEAF (low) elements: their own aggregated random-hardware band.
-         · ROLL-UP (mid/top) elements: the SAME metrics aggregated over the
-           leaves that feed them through the fail net, so they reflect the real
-           SPFM/LFM/PMHF of their subtree (e.g. the top element reads the system
-           verdict), capped by the most-limiting Route 1ₕ among those leaves'
-           elements — never an optimistic rate-only band.
-         · empty elements (no contributing leaves): omitted (no band to show).
-       One source so the canvas, the right pane and the report all agree. */
-    fmedaElementBands(iso) {
+    /* Achieved-integrity STATE per architecture element, in the active lens
+       (iso=true → ASIL, false → SIL). The SINGLE source the canvas, the right
+       pane and the report all read, so they can never disagree on whether an
+       element has a band — or on WHY it doesn't. Returns a map
+         { elementId: { id, band, computed, reason } }
+       with `band` the integrity string (null when not computed), `computed`
+       true when a band could be derived, and `reason` one of:
+         · 'leaf'    — low element banded from its OWN aggregated metrics.
+         · 'rollup'  — mid/top element banded from the leaves that feed it
+                       through the fail net (its subtree verdict), capped by the
+                       most-limiting Route 1ₕ among those leaves' owning
+                       elements — never an optimistic rate-only band.
+         · 'empty'   — element has no failure modes at all.
+         · 'no-rate' — LEAF element whose modes carry no quantified rate yet
+                       (nothing to aggregate), so its band cannot be computed.
+         · 'unwired' — mid/top ROLL-UP element with no failure-net path from any
+                       low-level cause, so its derived effects have nothing to
+                       roll up. THIS is the usual reason a freshly-built model
+                       shows "not yet computed" where the (fully hand-wired)
+                       reference does not — connect the failure net to resolve.
+       Before v2.8.1 the band map and the element CARDS were computed from two
+       different places (fmedaElementBands vs fmedaRollup), so an element could
+       get a card with no band and a bare, unexplained "not yet computed". */
+    fmedaElementBandState(iso) {
         const out = {};
         if (this.mode !== 'FMEDA') return out;
         const met = this.fmedaMetrics();
         const byId = {}; met.elements.forEach(m => { if (m.id) byId[m.id] = m; });
+        // Elements that own at least one failure mode (so they are "started").
+        const hasModes = {};
+        this.events.forEach(e => {
+            if (e.kind !== 'basic' || !e.groupId) return;
+            const el = this.elementOf(e.groupId);
+            if (el) hasModes[el.id] = true;
+        });
+        const set = (id, band, computed, reason) => {
+            out[id] = { id, band, computed, reason };
+        };
         this.elementGroups().forEach(el => {
-            if (byId[el.id]) {                       // low element: own metrics
-                out[el.id] = fmt.achievedBand(byId[el.id], iso);
+            const isRollup = (el.level === 'top' || el.level === 'mid');
+            if (byId[el.id]) {                       // leaf with quantified metrics
+                set(el.id, fmt.achievedBand(byId[el.id], iso), true, 'leaf');
                 return;
             }
+            if (!hasModes[el.id]) { set(el.id, null, false, 'empty'); return; }
+            if (!isRollup)        { set(el.id, null, false, 'no-rate'); return; }
             const leaves = this.fmedaElementLeaves(el.id);
-            if (!leaves.length) return;              // empty → no band
+            if (!leaves.length)   { set(el.id, null, false, 'unwired'); return; }
             // Architectural cap = the most limiting Route 1ₕ among the low
             // elements that own these subtree leaves.
             let cap = null;
@@ -852,9 +878,41 @@ class Project {
                 if (r && r !== '—' && (cap == null || fmt.silRank(r) < fmt.silRank(cap))) cap = r;
             });
             const agg = this._fmedaAggregateLeaves(leaves, cap);
-            if (agg.count > 0) out[el.id] = fmt.achievedBand(agg, iso);
+            if (agg.count > 0) set(el.id, fmt.achievedBand(agg, iso), true, 'rollup');
+            else               set(el.id, null, false, 'unwired');
         });
         return out;
+    }
+
+    /* Band-only projection of fmedaElementBandState: { elementId: bandString }
+       for the elements that HAVE a computed band (omitting the rest). Kept as a
+       stable, narrow accessor for the canvas/report/right-pane band lookups. */
+    fmedaElementBands(iso) {
+        const out = {};
+        const st = this.fmedaElementBandState(iso);
+        Object.keys(st).forEach(id => { if (st[id].computed) out[id] = st[id].band; });
+        return out;
+    }
+
+    /* The architecture elements in the order the results panel and the report
+       should present them: elements WITH a computed band first (most stringent
+       first, by residual), then those still awaiting input (roll-ups not yet
+       wired into the failure net, or leaves with no rate) — so a "not yet
+       computed" element can never sort ABOVE one that has a real band (the v2.8.0
+       bug: zero-residual unbanded elements sorted to the top as if best). Each
+       returned row is a fmedaRollup element annotated with its band state. */
+    fmedaElementsForDisplay(iso) {
+        const ru = this.fmedaRollup();
+        const st = this.fmedaElementBandState(iso);
+        return ru.elements.map(e => {
+            const s = st[e.id] || { band: null, computed: false, reason: 'empty' };
+            return Object.assign({}, e, {
+                band: s.band, bandComputed: s.computed, bandReason: s.reason
+            });
+        }).sort((a, b) => {
+            if (a.bandComputed !== b.bandComputed) return a.bandComputed ? -1 : 1;
+            return a.integrityFit - b.integrityFit;
+        });
     }
 
     /* ── FMEDA net edges ──────────────────────────────────────────────

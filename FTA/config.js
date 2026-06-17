@@ -13,8 +13,8 @@ const CONFIG = {
        and stamped into exported reports / saved projects. BUMP THIS ON
        EVERY ITERATION of development — patch for fixes, minor for new
        features, major for breaking changes. */
-    appVersion:  '2.8.0',
-    releaseDate: '2026-06-16',
+    appVersion:  '2.9.1',
+    releaseDate: '2026-06-17',
 
     /* JSON file-format version. v2 added direct links; v3 was an earlier
        (now removed) ETA experiment; v4 stores two fully independent
@@ -351,6 +351,27 @@ const CONFIG = {
             body:
                 '<p>ISO 26262 latent / multiple-point fault coverage: the fraction of <em>detected</em> (multiple-point) faults whose latency is itself revealed — by a periodic test, monitoring, or a driver warning. It drives the <strong>latent-fault metric (LFM)</strong>, not the single-point residual.</p>' +
                 '<p>Leave <strong>0</strong> when there is no latent-fault check. Example: a periodic RAM test that reveals an otherwise-latent fault → DC₂ ≈ 60–90%.</p>'
+        },
+        elementType: {
+            title: 'Element type — A or B (IEC 61508-2)',
+            body:
+                '<p>IEC 61508-2 splits hardware into two types, which set the <strong>Route 1<sub>H</sub></strong> architectural cap on the SIL an element may claim (together with its SFF and HFT, Tables 2 &amp; 3):</p>' +
+                '<ul>' +
+                '<li><strong>Type A — simple.</strong> The failure modes of <em>all</em> components are well defined, the behaviour under fault conditions is fully determined, and there is dependable failure-rate data. Think discrete components and simple, fully-characterised circuits (a relay, a resistor network, a simple comparator).</li>' +
+                '<li><strong>Type B — complex / subsystem.</strong> Anything where the above is <em>not</em> fully true: a microcontroller, ASIC, FPGA, or an integrated <strong>subsystem</strong> whose internal failure behaviour you cannot fully characterise. A higher-level (mid / <strong>top</strong>) element is very often a subsystem — a black box specified by its interfaces and a supplier safety claim — and is therefore Type B.</li>' +
+                '</ul>' +
+                '<p>Type B is the conservative default and demands a higher SFF (or HFT) than Type A for the same SIL. When in doubt, or for any programmable / integrated part, choose Type B.</p>'
+        },
+        hft: {
+            title: 'Hardware fault tolerance (HFT)',
+            body:
+                '<p><strong>HFT N</strong> means <strong>N + 1</strong> independent dangerous faults are needed before the safety function is lost — i.e. the element can tolerate N faults. It is the redundancy of the element\'s architecture, not a rate.</p>' +
+                '<ul>' +
+                '<li><strong>HFT 0</strong> — a single, non-redundant channel: one fault can defeat it (the default).</li>' +
+                '<li><strong>HFT 1</strong> — 1-out-of-2 redundancy (two independent channels; one can fail safely).</li>' +
+                '<li><strong>HFT 2</strong> — triple redundancy (e.g. 2-out-of-3 voting).</li>' +
+                '</ul>' +
+                '<p>Under Route 1<sub>H</sub> a higher HFT lifts the SIL cap for a given SFF, so adding redundancy can buy back integrity that the safe-failure fraction alone cannot. For a <strong>subsystem</strong>, use the redundancy of its internal architecture (from its safety manual). Only independent redundancy counts — shared causes (one supply, one clock) do not raise HFT.</p>'
         },
         datasheet: {
             title: 'From a datasheet FMEDA (λ_S / λ_DD / λ_DU)',

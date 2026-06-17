@@ -31,6 +31,11 @@ const main = (() => {
         catalog.render('catalogList', _onCatalogPick, 'FTA');
 
         controls.init('controlsPane', {
+            // The right pane reads the live project for the single-source
+            // achieved-integrity bands (fmedaElementBandState). Without this it
+            // was null, so EVERY element card fell back to "Integrity not yet
+            // computed" even though the canvas showed the real band.
+            getProject:          () => project,
             onRecalculate:       _runAnalysis,
             onClearAnalysis:     _clearAnalysis,
             onAutoLayout:        () => { canvas.autoLayout(); setTimeout(canvas.fit, 380); },

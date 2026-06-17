@@ -941,6 +941,36 @@ textarea.dlg-inp { font-family: 'Outfit', sans-serif; resize: vertical; }
 .dlg-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.55rem; }
 @media (max-width: 480px) { .dlg-row { grid-template-columns: 1fr; } }
 
+/* Rate-unit selector that sits inside the affix slot (FIT / per-hour). */
+.dlg-affix-wrap .dlg-affix-sel {
+    position: absolute;
+    right: 0.35rem;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 0.72rem;
+    color: var(--text-dim, #888);
+    background: transparent;
+    border: none;
+    padding: 0 0.1rem;
+    cursor: pointer;
+}
+.dlg-affix-wrap:has(.dlg-affix-sel) .dlg-inp { padding-right: 3.6rem; }
+
+/* "Refine the assumptions" progressive-disclosure drawer. */
+.dlg-drawer { margin: 0.35rem 0 0; border-top: 1px solid var(--border, #e4e4e7); }
+.dlg-drawer-sum {
+    cursor: pointer;
+    font-size: 0.74rem;
+    color: var(--accent, #4f46e5);
+    padding: 0.4rem 0 0.2rem;
+    list-style: none;
+    user-select: none;
+}
+.dlg-drawer-sum::-webkit-details-marker { display: none; }
+.dlg-drawer-sum::before { content: '▸ '; font-size: 0.7rem; }
+.dlg-drawer[open] .dlg-drawer-sum::before { content: '▾ '; }
+.dlg-drawer-body { padding-top: 0.15rem; }
+
 .dlg-note {
     font-size: 0.72rem;
     color: var(--text-mid);

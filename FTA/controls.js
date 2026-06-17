@@ -788,9 +788,8 @@ const controls = (() => {
 
         // Per-element achieved band (leaf → aggregated metrics; mid/top →
         // subtree aggregate), in the active lens — one source shared with the
-        // canvas and report.
+        // canvas and report (fmedaElementBandState).
         const _proj = (cb.getProject && cb.getProject()) ? cb.getProject() : null;
-        const elBands = _proj ? _proj.fmedaElementBands(iso) : {};
         // A chip from a band STRING (the achieved band). Same single-scale
         // rule: ASIL under ISO, SIL under IEC.
         const bandChipStr = (bandStr) => {
@@ -802,21 +801,79 @@ const controls = (() => {
             const lbl = simple ? (CONFIG.simpleLabels.sil[bandStr] || bandStr) : bandStr;
             return `<span class="ctrl-chip ctrl-chip-sil ${_silClass(bandStr)}">${fmt.escHtml(lbl)}</span>`;
         };
+        // Why an element has no computed band — actionable, not a bare
+        // "not yet computed". Mirrors fmedaElementBandState's `reason`.
+        const bandReasonNote = (reason) => {
+            if (reason === 'unwired')
+                return 'Roll-up element — connect the failure net from a low-level cause so its integrity can roll up.';
+            if (reason === 'no-rate')
+                return 'No failure rate entered yet — quantify its modes to compute the band.';
+            return 'Integrity not yet computed';
+        };
+        // Per-element metrics for the cap explanation — why an element's band
+        // can sit below the band its rate alone would reach. Both lenses get a
+        // plain-language reason + what raises it (the "no unexplained anomaly"
+        // rule: never show ASIL A under a SIL-4-rate function without saying why).
+        const _metById = {};
+        if (rollup.metrics && rollup.metrics.elements)
+            rollup.metrics.elements.forEach(m => { if (m.id) _metById[m.id] = m; });
+        const _asilRank = a => {
+            const o = { 'QM': 0, 'ASIL A': 1, 'ASIL B': 2, 'ASIL C': 3, 'ASIL D': 4 };
+            return (a in o) ? o[a] : -1;
+        };
+        const capNote = (elr) => {
+            if (!elr.bandComputed) return '';
+            const m = _metById[elr.id];
+            if (!m) return '';
+            if (iso) {
+                // ISO: a band below the rate band means the SPFM/LFM gate, not
+                // the rate, is the limit. Name the shortfall against ASIL B
+                // (the first metric-gated rung) so the user knows what to set.
+                const pmhf = (m.lambdaSPF + m.lambdaRF) * 1e-9;
+                const rateAsil = fmt.asilForPfh(pmhf);
+                if (_asilRank(elr.band) >= _asilRank(rateAsil)) return '';
+                const parts = [];
+                if (m.spfm != null && m.spfm < 0.90)
+                    parts.push(`its single-point-fault metric SPFM is ${Math.round(m.spfm * 100)}% (ASIL B needs ≥ 90%) — add diagnostic coverage DC₁ or characterise safe failures (dangerous fraction < 100%)`);
+                if (m.lfm != null && m.lfm < 0.60)
+                    parts.push(`its latent-fault metric LFM is ${Math.round(m.lfm * 100)}% (ASIL B needs ≥ 60%) — set the latent-fault coverage DC₂ in the failure-mode editor`);
+                if (!parts.length) return '';
+                return `<div class="res-m-note">Capped at ${fmt.escHtml(elr.band)} even though its rate alone reaches ${fmt.escHtml(rateAsil)}: ${parts.join('; and ')}.</div>`;
+            }
+            // IEC: the Route 1ₕ architectural constraint (incl. "not allowed").
+            if (!m.route1hSil || m.route1hSil === '—') return '';
+            const rateSil = fmt.silForPfh(m.lambdaDU * 1e-9);
+            if (fmt.silRank(m.route1hSil) >= fmt.silRank(rateSil)) return '';
+            const capTxt = (m.route1hSil === 'not allowed')
+                ? 'allows no SIL claim'
+                : 'caps it at ' + fmt.escHtml(m.route1hSil);
+            return `<div class="res-m-note">Limited by Route 1<sub>H</sub> (Type ${fmt.escHtml(m.elementType || 'B')}, HFT ${m.hft || 0}, SFF ${m.sff == null ? '—' : Math.round(m.sff * 100) + '%'}): the architecture ${capTxt}, though the rate alone would reach ${fmt.escHtml(rateSil)}. Raise SFF (diagnostic coverage DC₁ or safe-failure share), set Type A if it is a simple element, or add hardware fault tolerance (HFT).</div>`;
+        };
 
         // ── 1. Elements: achieved integrity ──────────────────────────
         if (rollup.elements && rollup.elements.length) {
             html += `<div class="res-section">Architecture elements</div>`;
-            html += `<div class="res-m-note">Leaf (low-level) elements show the <em>aggregated</em> random-hardware band (${iso ? 'PMHF · SPFM · LFM' : 'PFH band capped by Route 1<sub>H</sub>'}) over all their failure modes. Mid/top roll-up elements show those same metrics aggregated over the leaves that feed them (their subtree verdict).</div>`;
-            rollup.elements.slice().sort((a, b) => a.integrityFit - b.integrityFit)
-              .forEach(elr => {
-                const chip = bandChipStr(elBands[elr.id]);
+            html += `<div class="res-m-note">Leaf (low-level) elements show the <em>aggregated</em> random-hardware band (${iso ? 'PMHF · SPFM · LFM' : 'PFH band capped by Route 1<sub>H</sub>'}) over all their failure modes. Mid/top roll-up elements show those same metrics aggregated over the leaves that feed them (their subtree verdict). Elements still awaiting input are listed last.</div>`;
+            // Single source for both the band AND the order: elements with a
+            // computed band first (most stringent first), "not yet computed"
+            // last — never sorted to the top by a zero residual (the v2.8.0 bug).
+            const elemRows = _proj
+                ? _proj.fmedaElementsForDisplay(iso)
+                : rollup.elements.slice().sort((a, b) => a.integrityFit - b.integrityFit)
+                    .map(e => Object.assign({}, e, { band: null, bandComputed: false, bandReason: 'empty' }));
+            elemRows.forEach(elr => {
+                const chip = elr.bandComputed ? bandChipStr(elr.band) : '';
+                const levels = chip
+                    ? chip
+                    : `<span class="res-raw">${fmt.escHtml(bandReasonNote(elr.bandReason))}</span>`;
                 html += `
                     <div class="res-card res-el-card">
                         <div class="res-fn">${fmt.escHtml(elr.name)}
                             <span class="res-id">${fmt.escHtml(elr.id)}</span>
                             ${elr.level ? `<span class="res-lvl">${fmt.escHtml(elr.level)}</span>` : ''}</div>
-                        <div class="res-levels">${chip || '<span class="res-raw">Integrity not yet computed</span>'}</div>
+                        <div class="res-levels">${levels}</div>
                         <div class="res-pfh">total residual ${fitStr(elr.residualFit)}</div>
+                        ${capNote(elr)}
                     </div>`;
             });
         }

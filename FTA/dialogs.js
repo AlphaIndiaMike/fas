@@ -558,9 +558,16 @@ const dialogs = (() => {
         return v;
     }
 
-    /* The FMEDA failure-mode input block: base λ + FMD % + dangerous % + DC₁ %
-       + DC₂ %, all in one area, fractions shown as whole percents with a greyed
-       % affix. The live readout (#fLive) shows every derived quantity. */
+    /* The FMEDA failure-mode input block. Only the two inputs that always
+       matter — the base rate λ and the diagnostic coverage DC₁ — are shown up
+       front; everything else (the dangerous split, mode share, latent coverage,
+       mission time) is folded into an optional "refine the assumptions" drawer.
+       A beginner can enter λ + DC₁ and get a usable, conservative model; an
+       expert opens the drawer to refine. The rate can be entered in FIT or per
+       hour (PFH) — handy for a subsystem quoted as a PFH. Each field's full
+       explanation lives behind its (?) help. The live readout (#fLive) shows
+       every derived quantity, and a one-line summary states the assumptions in
+       force while the drawer is closed. */
     function _fmedaInputBodyHtml(e) {
         const pct = (id, frac) =>
             `<div class="dlg-affix-wrap">` +
@@ -571,31 +578,38 @@ const dialogs = (() => {
         const dang = e.dangerousFraction != null ? e.dangerousFraction : 1;
         const dc1  = fmt.clamp(e.diagnosticCoverage, 0, 1, 0);
         const dc2  = fmt.clamp(e.diagnosticCoverageLatent, 0, 1, 0);
+        // Rate unit: stored in FIT, optionally entered/shown as /h (PFH).
+        const unit = (e.lambdaUnit === 'ph') ? 'ph' : 'fit';
+        const lamShown = (unit === 'ph') ? (lam * 1e-9) : lam;
         return `
             <div class="dlg-row">
-                ${_field('Base failure rate, λ (FIT) ' + _help('lambdaBase'),
-                    `<div class="dlg-affix-wrap"><input class="dlg-inp" id="fLambdaBase" type="number" min="0" step="any" value="${lam}"><span class="dlg-affix">FIT</span></div>`,
-                    'The mode\'s base failure rate, from a datasheet or reliability prediction. 1 FIT = 1 failure / 10⁹ h. Example: 120 FIT.')}
-                ${_field('Failure-mode distribution, FMD ' + _help('fmd'),
-                    pct('fFmd', fmd),
-                    'This mode\'s share of λ — λ_mode = λ × FMD. Leave 100% if λ is already this single mode\'s rate; use the datasheet FMD table to split a component into several modes.')}
-            </div>
-            <div class="dlg-row">
-                ${_field('Dangerous fraction ' + _help('dangerousFraction'),
-                    pct('fDangerous', dang),
-                    'Share of λ_mode that can violate the safety goal: λ_D = λ_mode × this, and the rest is the safe rate λ_S. 100% treats the whole mode as dangerous (conservative — the previous default).')}
+                ${_field('Base failure rate, λ ' + _help('lambdaBase'),
+                    `<div class="dlg-affix-wrap"><input class="dlg-inp" id="fLambdaBase" type="number" min="0" step="any" value="${lamShown}">` +
+                    `<select class="dlg-affix-sel" id="fLambdaUnit" title="Rate unit">` +
+                    `<option value="fit" ${unit === 'fit' ? 'selected' : ''}>FIT</option>` +
+                    `<option value="ph" ${unit === 'ph' ? 'selected' : ''}>/h (PFH)</option>` +
+                    `</select></div>`)}
                 ${_field('Diagnostic coverage, DC₁ ' + _help('coverage'),
-                    pct('fDC', dc1),
-                    'Fraction of λ_D the safety mechanism detects. Drives the residual λ_DU and SFF/SPFM. Example: 90% single CRC/BIST, 99% E2E.')}
+                    pct('fDC', dc1))}
             </div>
-            <div class="dlg-row">
-                ${_field('Latent-fault coverage, DC₂ ' + _help('latentCoverage'),
-                    pct('fDCL', dc2),
-                    'ISO 26262 latent-fault coverage — fraction of the detected (multiple-point) faults whose latency is itself revealed. Drives the LFM. Leave 0 if there is no latent-fault check.')}
-                ${_field('Mission time override (h)',
-                    `<input class="dlg-inp" id="fMtO" type="number" min="0" step="any" value="${e.missionTimeOverride != null ? e.missionTimeOverride : ''}">`,
-                    'Blank = use project mission time.')}
-            </div>
+            <details class="dlg-drawer" id="fAdvDrawer">
+                <summary class="dlg-drawer-sum">Refine the assumptions (optional)</summary>
+                <div class="dlg-drawer-body">
+                    <div class="dlg-row">
+                        ${_field('Dangerous fraction ' + _help('dangerousFraction'),
+                            pct('fDangerous', dang))}
+                        ${_field('Failure-mode distribution, FMD ' + _help('fmd'),
+                            pct('fFmd', fmd))}
+                    </div>
+                    <div class="dlg-row">
+                        ${_field('Latent-fault coverage, DC₂ ' + _help('latentCoverage'),
+                            pct('fDCL', dc2))}
+                        ${_field('Mission time override (h) ' + _help('missionTime'),
+                            `<input class="dlg-inp" id="fMtO" type="number" min="0" step="any" value="${e.missionTimeOverride != null ? e.missionTimeOverride : ''}">`)}
+                    </div>
+                </div>
+            </details>
+            <div class="dlg-note dlg-note--flush" id="fAssume"></div>
             <div class="dlg-note" id="fLive"></div>`;
     }
 
@@ -744,6 +758,23 @@ const dialogs = (() => {
         body.querySelectorAll('input[type="number"]').forEach(i => {
             i.addEventListener('input', () => _liveUpdate(project, e));
         });
+        // FMEDA base-rate unit toggle (FIT ⇄ /h): convert the shown value in
+        // place so the stored FIT is unchanged, then refresh the readout.
+        const unitSel = document.getElementById('fLambdaUnit');
+        const lamB    = document.getElementById('fLambdaBase');
+        if (unitSel && lamB) {
+            unitSel.addEventListener('change', () => {
+                const v = +lamB.value || 0;
+                if (unitSel.value === 'ph' && unitSel.dataset.prev !== 'ph') {
+                    lamB.value = v * 1e-9;            // FIT → /h
+                } else if (unitSel.value === 'fit' && unitSel.dataset.prev === 'ph') {
+                    lamB.value = v * 1e9;             // /h → FIT
+                }
+                unitSel.dataset.prev = unitSel.value;
+                _liveUpdate(project, e);
+            });
+            unitSel.dataset.prev = unitSel.value;
+        }
         _liveUpdate(project, e);
     }
 
@@ -760,6 +791,20 @@ const dialogs = (() => {
             const fmd  = fmt.clamp(e.fmd, 0, 1, 1);
             const dang = fmt.clamp(e.dangerousFraction, 0, 1, 1);
             const dc1  = fmt.clamp(e.diagnosticCoverage, 0, 1, 0);
+            const dc2  = fmt.clamp(e.diagnosticCoverageLatent, 0, 1, 0);
+            // State the assumptions still at their conservative default, so the
+            // user knows what the model is filling in for them (drawer closed).
+            const assume = document.getElementById('fAssume');
+            if (assume) {
+                const a = [];
+                if (dang === 1)  a.push('all failures dangerous (100%)');
+                if (dc1  === 0)  a.push('no diagnostic coverage');
+                if (dc2  === 0)  a.push('no latent-fault check');
+                if (fmd  === 1)  a.push('single mode (FMD 100%)');
+                assume.innerHTML = a.length
+                    ? 'Assuming ' + a.join(', ') + ' — refine in the drawer above to raise the achievable integrity.'
+                    : '';
+            }
             const lamMode = base * fmd;
             const lamD = lamMode * dang, lamS = lamMode * (1 - dang);
             const lamDD = lamD * dc1,   lamDU = lamD * (1 - dc1);
@@ -846,7 +891,15 @@ const dialogs = (() => {
         }
         if (rate)    draft.failureRate        = +rate.value;
         if (rateRaw) draft.failureRateRaw     = +rateRaw.value;
-        if (lamB)    draft.lambdaBase         = +lamB.value;
+        if (lamB) {
+            // λ is stored in FIT. If the user is entering it as a per-hour rate
+            // (PFH), convert: 1 FIT = 1e-9 /h. The chosen unit is remembered so
+            // the field reopens in the same unit.
+            const unitSel = document.getElementById('fLambdaUnit');
+            const unit = unitSel ? unitSel.value : 'fit';
+            draft.lambdaUnit = (unit === 'ph') ? 'ph' : 'fit';
+            draft.lambdaBase = (unit === 'ph') ? (+lamB.value || 0) * 1e9 : +lamB.value;
+        }
         if (fmdEl)   draft.fmd                = asFrac(fmdEl);
         if (dangEl)  draft.dangerousFraction  = asFrac(dangEl);
         // DC fields are percents in the FMEDA editor (data-pct), plain 0–1 in
@@ -1413,10 +1466,12 @@ const dialogs = (() => {
 
         // Route 1ₕ inputs for any element (element kind, incl. mitigation
         // elements): IEC 61508 element Type A/B and hardware fault tolerance.
+        // Help lives behind the (?) buttons (consistent with every other
+        // field), not inline.
         if (isFmeda && g.kind === 'element') {
             const et = (g.elementType === 'A') ? 'A' : 'B';
             const hv = Math.max(0, Math.min(2, parseInt(g.hft, 10) || 0));
-            const typeOpts = [['A', 'Type A — simple'], ['B', 'Type B — complex']].map(([v, l]) =>
+            const typeOpts = [['A', 'Type A — simple'], ['B', 'Type B — complex / subsystem']].map(([v, l]) =>
                 `<label class="dlg-chip ${et === v ? 'dlg-chip-on' : ''}">
                     <input type="radio" name="fElType" value="${v}" ${et === v ? 'checked' : ''}>
                     <span>${l}</span></label>`).join('');
@@ -1424,12 +1479,10 @@ const dialogs = (() => {
                 `<label class="dlg-chip ${hv === v ? 'dlg-chip-on' : ''}">
                     <input type="radio" name="fHft" value="${v}" ${hv === v ? 'checked' : ''}>
                     <span>${v}</span></label>`).join('');
-            fmedaFields += `<div class="dlg-label dlg-label--gap-sm">Element type — IEC 61508 Route 1ₕ</div>
+            fmedaFields += `<div class="dlg-label dlg-label--gap-sm">Element type — IEC 61508 Route 1ₕ ${_help('elementType')}</div>
                 <div class="dlg-chips" id="fElTypeChips">${typeOpts}</div>
-                <div class="dlg-hint dlg-hint--block">Type A = simple, well-characterised; Type B = complex (e.g. a microcontroller or ASIC). With the element's SFF and HFT this caps the SIL it may claim.</div>
-                <div class="dlg-label">Hardware fault tolerance (HFT)</div>
-                <div class="dlg-chips" id="fHftChips">${hftOpts}</div>
-                <div class="dlg-hint dlg-hint--block-flush">Redundancy: HFT N means N+1 faults are needed to lose the safety function. A single non-redundant channel is HFT 0.</div>`;
+                <div class="dlg-label">Hardware fault tolerance (HFT) ${_help('hft')}</div>
+                <div class="dlg-chips" id="fHftChips">${hftOpts}</div>`;
         }
 
         modal.open((existing ? 'Edit ' : 'New ') +
@@ -1893,18 +1946,35 @@ const dialogs = (() => {
         // Elements — achieved integrity. Leaf elements: their aggregated random-
         // hardware band. Mid/top roll-ups: the same metrics aggregated over the
         // leaves that feed them (their subtree verdict). One source
-        // (fmedaElementBands) so the report matches the canvas and right pane.
+        // (fmedaElementBandState) so the report matches the canvas and right pane —
+        // including WHY an element has no band, and computed-first ordering.
         lines.push('## Architecture elements (' + ru.elements.length + ')');
         if (!ru.elements.length) lines.push('- None defined.');
-        const elBands = p.fmedaElementBands(iso);
         const metById = {};
         m.elements.forEach(e => { if (e.id) metById[e.id] = e; });
-        ru.elements.slice().sort((a, b) => a.integrityFit - b.integrityFit).forEach(e => {
+        const reasonText = (reason) =>
+            reason === 'unwired' ? ' (roll-up — failure net not yet wired from a low-level cause)'
+          : reason === 'no-rate' ? ' (no failure rate entered yet)'
+          : '';
+        p.fmedaElementsForDisplay(iso).forEach(e => {
             const leaf = !!metById[e.id];
-            const band = elBands[e.id] || '—';
+            const band = e.bandComputed ? e.band : 'not yet computed';
+            let capTxt = '';
+            if (!iso && e.bandComputed && e.bandReason === 'leaf') {
+                const me = metById[e.id];
+                const rateSil = me ? fmt.silForPfh(me.lambdaDU * 1e-9) : null;
+                if (me && me.route1hSil && me.route1hSil !== '—' &&
+                    fmt.silRank(me.route1hSil) < fmt.silRank(rateSil)) {
+                    capTxt = ' [limited by Route 1ₕ: Type ' + (me.elementType || 'B') +
+                             ', HFT ' + (me.hft || 0) + ', SFF ' +
+                             (me.sff == null ? '—' : Math.round(me.sff * 100) + '%') +
+                             '; rate alone → ' + rateSil + ']';
+                }
+            }
             lines.push('- [' + e.id + '] ' + e.name +
                 (e.level ? ' (' + e.level + ')' : '') +
-                ' — achieved integrity ' + band +
+                ' — achieved integrity ' + band + capTxt +
+                (e.bandComputed ? '' : reasonText(e.bandReason)) +
                 '; total residual ' + fmt.fitStr(e.residualFit) +
                 (leaf ? '' : ' (roll-up — subtree aggregate)'));
         });
