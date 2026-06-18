@@ -779,6 +779,57 @@ const controls = (() => {
         };
 
         let html = '';
+        const _proj = (cb.getProject && cb.getProject()) ? cb.getProject() : null;
+
+        // ── Checks: catch likely user/model errors and say so plainly. Kept
+        // deliberately small — high-signal, cheap to evaluate. Shown FIRST so a
+        // problem is seen before the numbers that depend on it.
+        const checks = [];
+        (rollup.functions || []).forEach(f => {
+            if (!isFinite(f.residualFit) || f.residualFit < 0)
+                checks.push({ lvl: 'error', msg: `Function ${f.name} (${f.id}) has an invalid residual rate — check its failure-mode inputs.` });
+        });
+        if (_proj && _proj.events) {
+            _proj.events.forEach(e => {
+                if (e.kind !== 'basic') return;
+                const dc   = +e.diagnosticCoverage || 0;
+                const base = +e.lambdaBase || +e.failureRateRaw || 0;
+                if (dc > 0 && base <= 0)
+                    checks.push({ lvl: 'warn', msg: `Failure mode "${e.name}" has diagnostic coverage but no failure rate — the coverage has no effect until a rate is entered.` });
+                const d = e.dangerousFraction;
+                if (d != null && (d < 0 || d > 1))
+                    checks.push({ lvl: 'warn', msg: `Failure mode "${e.name}" has a dangerous fraction outside 0–100%.` });
+            });
+        }
+        if (_proj && _proj.elementGroups) {
+            const minRes = {};
+            (rollup.functions || []).forEach(f => {
+                if (f.elementId == null) return;
+                if (minRes[f.elementId] == null || f.residualFit < minRes[f.elementId]) minRes[f.elementId] = f.residualFit;
+            });
+            const asilOrder = ['QM', 'ASIL A', 'ASIL B', 'ASIL C', 'ASIL D'];
+            _proj.elementGroups().forEach(g => {
+                const cap = g.claimedCapability;
+                if (!cap) return;
+                const res = minRes[g.id];
+                if (res == null) return;   // nothing to compare against yet
+                if (/^SIL/.test(cap)) {
+                    const r = fmt.silForPfh(res * 1e-9);
+                    if (fmt.silRank(cap) > fmt.silRank(r))
+                        checks.push({ lvl: 'warn', msg: `${g.name} (${g.id}) declares ${cap}, but its functions' rate supports only ${r}. Verify the supplier claim or the failure rates.` });
+                } else {
+                    const r = fmt.asilForPfh(res * 1e-9);
+                    if (asilOrder.indexOf(cap) > asilOrder.indexOf(r))
+                        checks.push({ lvl: 'warn', msg: `${g.name} (${g.id}) declares ${cap}, but its functions' rate supports only ${r}. Verify the supplier claim or the failure rates.` });
+                }
+            });
+        }
+        if (checks.length) {
+            html += `<div class="res-section">Checks</div>`;
+            checks.forEach(c => {
+                html += `<div class="res-check res-check--${c.lvl}">${c.lvl === 'error' ? '⛔' : '⚠'} ${fmt.escHtml(c.msg)}</div>`;
+            });
+        }
 
         // ── 0. FMEDA metrics: λ breakdown, SFF, SPFM/LFM ─────────────
         if (rollup.metrics && rollup.metrics.total &&
@@ -786,10 +837,8 @@ const controls = (() => {
             html += _fmedaMetricsHtml(rollup.metrics, simple);
         }
 
-        // Per-element achieved band (leaf → aggregated metrics; mid/top →
-        // subtree aggregate), in the active lens — one source shared with the
-        // canvas and report (fmedaElementBandState).
-        const _proj = (cb.getProject && cb.getProject()) ? cb.getProject() : null;
+        // Per-element band comes from fmedaElementBandState (declaration-only) —
+        // one source shared with the canvas and report.
         // A chip from a band STRING (the achieved band). Same single-scale
         // rule: ASIL under ISO, SIL under IEC.
         const bandChipStr = (bandStr) => {
@@ -801,14 +850,12 @@ const controls = (() => {
             const lbl = simple ? (CONFIG.simpleLabels.sil[bandStr] || bandStr) : bandStr;
             return `<span class="ctrl-chip ctrl-chip-sil ${_silClass(bandStr)}">${fmt.escHtml(lbl)}</span>`;
         };
-        // Why an element has no computed band — actionable, not a bare
-        // "not yet computed". Mirrors fmedaElementBandState's `reason`.
+        // Why an element shows no SIL/ASIL — it carries the integrity you
+        // DECLARE for it, not one inferred from its functions.
         const bandReasonNote = (reason) => {
-            if (reason === 'unwired')
-                return 'Roll-up element — connect the failure net from a low-level cause so its integrity can roll up.';
-            if (reason === 'no-rate')
-                return 'No failure rate entered yet — quantify its modes to compute the band.';
-            return 'Integrity not yet computed';
+            if (reason === 'empty')
+                return 'No failure modes yet — add functions and failure modes below.';
+            return 'No integrity declared — open the element and set a claimed SFF or a claimed SIL/ASIL capability to assign its band. (Its functions and failure modes are computed below.)';
         };
         // Per-element metrics for the cap explanation — why an element's band
         // can sit below the band its rate alone would reach. Both lenses get a
@@ -823,6 +870,7 @@ const controls = (() => {
         };
         const capNote = (elr) => {
             if (!elr.bandComputed) return '';
+            if (elr.bandReason === 'claimed') return '';   // claim, not a derived cap
             const m = _metById[elr.id];
             if (!m) return '';
             if (iso) {
@@ -850,17 +898,25 @@ const controls = (() => {
             return `<div class="res-m-note">Limited by Route 1<sub>H</sub> (Type ${fmt.escHtml(m.elementType || 'B')}, HFT ${m.hft || 0}, SFF ${m.sff == null ? '—' : Math.round(m.sff * 100) + '%'}): the architecture ${capTxt}, though the rate alone would reach ${fmt.escHtml(rateSil)}. Raise SFF (diagnostic coverage DC₁ or safe-failure share), set Type A if it is a simple element, or add hardware fault tolerance (HFT).</div>`;
         };
 
+        // A claimed band is a supplier assumption — flag it for traceability.
+        const claimNote = (elr) => {
+            if (elr.bandReason !== 'claimed' || !_proj) return '';
+            const el = _proj.groupById ? _proj.groupById(elr.id) : null;
+            if (!el) return '';
+            const bits = [];
+            if (el.claimedCapability) bits.push(`capability ${fmt.escHtml(el.claimedCapability)}`);
+            if (el.claimedSff != null) bits.push(`SFF ${Math.round(el.claimedSff * 100)}%`);
+            return `<div class="res-m-note res-m-note--claim">Band from <strong>supplier claim</strong> (${bits.join(', ')}) — an assumption to validate against the subsystem's safety manual / certificate.</div>`;
+        };
+
         // ── 1. Elements: achieved integrity ──────────────────────────
-        if (rollup.elements && rollup.elements.length) {
+        const elemRows = _proj
+            ? _proj.fmedaElementsForDisplay(iso)
+            : (rollup.elements || []).slice().sort((a, b) => a.integrityFit - b.integrityFit)
+                .map(e => Object.assign({}, e, { band: null, bandComputed: false, bandReason: 'empty' }));
+        if (elemRows.length) {
             html += `<div class="res-section">Architecture elements</div>`;
-            html += `<div class="res-m-note">Leaf (low-level) elements show the <em>aggregated</em> random-hardware band (${iso ? 'PMHF · SPFM · LFM' : 'PFH band capped by Route 1<sub>H</sub>'}) over all their failure modes. Mid/top roll-up elements show those same metrics aggregated over the leaves that feed them (their subtree verdict). Elements still awaiting input are listed last.</div>`;
-            // Single source for both the band AND the order: elements with a
-            // computed band first (most stringent first), "not yet computed"
-            // last — never sorted to the top by a zero residual (the v2.8.0 bug).
-            const elemRows = _proj
-                ? _proj.fmedaElementsForDisplay(iso)
-                : rollup.elements.slice().sort((a, b) => a.integrityFit - b.integrityFit)
-                    .map(e => Object.assign({}, e, { band: null, bandComputed: false, bandReason: 'empty' }));
+            html += `<div class="res-m-note">An element's SIL/ASIL is the integrity you <strong>declare</strong> for it — a claimed SFF (read through Route 1<sub>H</sub> with its Type/HFT) or a claimed SIL/ASIL capability. It is not inferred from the functions; the functions and failure modes below carry the computed rates. Undeclared elements show no band.</div>`;
             elemRows.forEach(elr => {
                 const chip = elr.bandComputed ? bandChipStr(elr.band) : '';
                 const levels = chip
@@ -873,7 +929,7 @@ const controls = (() => {
                             ${elr.level ? `<span class="res-lvl">${fmt.escHtml(elr.level)}</span>` : ''}</div>
                         <div class="res-levels">${levels}</div>
                         <div class="res-pfh">total residual ${fitStr(elr.residualFit)}</div>
-                        ${capNote(elr)}
+                        ${claimNote(elr)}
                     </div>`;
             });
         }

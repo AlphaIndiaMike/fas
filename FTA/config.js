@@ -13,7 +13,7 @@ const CONFIG = {
        and stamped into exported reports / saved projects. BUMP THIS ON
        EVERY ITERATION of development — patch for fixes, minor for new
        features, major for breaking changes. */
-    appVersion:  '2.9.1',
+    appVersion:  '2.11.0',
     releaseDate: '2026-06-17',
 
     /* JSON file-format version. v2 added direct links; v3 was an earlier
@@ -96,25 +96,27 @@ const CONFIG = {
         { sil: 'No SIL', max: Infinity }
     ],
 
-    /* ASIL bands from the ISO 26262-5 PMHF reference targets — the *real*
-       numbers, no forced pairing with the SIL ladder. ASIL D ≤ 1e-8 /h
-       (10 FIT); ASIL C and ASIL B share ≤ 1e-7 /h (100 FIT) — PMHF alone does
-       not separate B from C (the SPFM/LFM metrics do), so a rate that meets
-       B's target also meets C's, and the highest band reachable from a rate is
-       reported. ASIL A is `informative`: ISO 26262 sets NO quantitative PMHF
-       target for ASIL A (it is assigned qualitatively from the HARA), so an
-       ASIL A reading here is not a rate threshold and the UI marks it `*`.
+    /* ASIL bands from the ISO 26262-5 PMHF reference targets. ASIL D ≤ 1e-8 /h
+       (10 FIT). ASIL C and ASIL B share the SAME PMHF target (≤ 1e-7 /h, 100
+       FIT) — PMHF alone does NOT separate B from C; only the SPFM/LFM metrics
+       do. So a RATE-only reading of that band reports the highest a rate alone
+       can support, which is **ASIL B** (claiming ASIL C additionally requires
+       SPFM ≥ 97 % / LFM ≥ 80 %, evaluated on the element via asilFromMetrics).
+       ASIL C and ASIL D are therefore reachable only through the metric-gated
+       element band, never from a function's rate alone — by design. (A previous
+       table listed ASIL C ahead of an identical-bound ASIL B, which made ASIL B
+       unreachable and over-claimed C; that is fixed here.) ASIL A is
+       `informative`: ISO 26262 sets NO quantitative PMHF target for ASIL A (it
+       is assigned qualitatively from the HARA), so an ASIL A reading is not a
+       rate threshold and the UI marks it `*`.
 
        These bands are NEVER shown beside the SIL chip as a matched pair: the
        results panel uses a single-standard lens (ISO 26262 OR IEC 61508), so
        "SIL 4 / ASIL D" can never appear together and be misread as an
-       equivalence. An ASIL D element does not satisfy SIL 4 — SIL 4 sits above
-       anything ISO 26262 defines. Tested top-down: first band whose `max`
-       exceeds PFH wins. */
+       equivalence. Tested top-down: first band whose `max` exceeds PFH wins. */
     asilBands: [
         { asil: 'ASIL D', max: 1e-8 },
-        { asil: 'ASIL C', max: 1e-7 },
-        { asil: 'ASIL B', max: 1e-7 },   // same PMHF target as C
+        { asil: 'ASIL B', max: 1e-7 },   // B and C share this PMHF target; rate supports up to B
         { asil: 'ASIL A', max: 1e-5, informative: true },
         { asil: 'QM',     max: Infinity }
     ],
@@ -372,6 +374,16 @@ const CONFIG = {
                 '<li><strong>HFT 2</strong> — triple redundancy (e.g. 2-out-of-3 voting).</li>' +
                 '</ul>' +
                 '<p>Under Route 1<sub>H</sub> a higher HFT lifts the SIL cap for a given SFF, so adding redundancy can buy back integrity that the safe-failure fraction alone cannot. For a <strong>subsystem</strong>, use the redundancy of its internal architecture (from its safety manual). Only independent redundancy counts — shared causes (one supply, one clock) do not raise HFT.</p>'
+        },
+        subsystemClaim: {
+            title: 'Subsystem — supplier safety claim',
+            body:
+                '<p>For a black-box <strong>subsystem</strong> you often hold only the supplier\'s safety claim, not its internal failure modes. Without modes the computed SFF is 0, which would force a Type B element to "not allowed". These optional fields let you enter the claim the supplier has <em>already</em> discharged, so the element earns the integrity it was certified for. Both are recorded as <strong>assumptions to validate</strong> against the supplier\'s safety manual / certificate.</p>' +
+                '<ul>' +
+                '<li><strong>Claimed SFF (%)</strong> — the supplier\'s stated safe-failure fraction. It feeds the Route 1<sub>H</sub> table with this element\'s Type and HFT (IEC 61508 lens), exactly as a computed SFF would, instead of the 0 you would otherwise get.</li>' +
+                '<li><strong>Claimed capability (SIL / ASIL)</strong> — the integrity the supplier certifies the subsystem to (e.g. "SIL 2 capable", "ASIL B ready"). Used directly as the element\'s achieved band under the matching lens (the supplier already did Route 1<sub>H</sub> / the ISO metrics). It is still never reported above what an entered residual rate supports.</li>' +
+                '</ul>' +
+                '<p>If both are set, the more limiting one governs. A claimed SFF applies under the IEC lens; a claimed capability applies under whichever lens (SIL ⇒ IEC, ASIL ⇒ ISO) it is stated in. Leave both blank to compute the element from its own failure modes.</p>'
         },
         datasheet: {
             title: 'From a datasheet FMEDA (λ_S / λ_DD / λ_DU)',

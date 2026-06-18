@@ -1616,6 +1616,7 @@ textarea.dlg-inp { font-family: 'Outfit', sans-serif; resize: vertical; }
     margin: 5px 0 2px; padding-top: 4px; border-top: 1px dashed var(--border, #ddd);
 }
 .res-m-note { font-size: 0.6rem; color: #999; margin-top: 5px; font-style: italic; }
+.res-m-note--claim { color: var(--accent, #4f46e5); font-style: normal; }
 .res-m-tgt {
     font-size: 0.58rem; color: #9a9890; text-align: right;
     margin: -1px 0 3px; font-style: italic;
@@ -1652,6 +1653,12 @@ textarea.dlg-inp { font-family: 'Outfit', sans-serif; resize: vertical; }
     border-radius: 3px; padding: 2px 6px; margin-top: 4px;
     border-left: 3px solid #d49a2a;
 }
+.res-check {
+    font-size: 0.66rem; line-height: 1.4; border-radius: 3px;
+    padding: 4px 8px; margin: 3px 0; border-left: 3px solid;
+}
+.res-check--warn  { color: #8a5a12; background: #faf0dc; border-color: #d49a2a; }
+.res-check--error { color: #8a1f1f; background: #fbe6e6; border-color: #cc3333; }
 .res-sr-card { background: #f7faf3; }
 .res-sr-id {
     font-family: 'JetBrains Mono', monospace; font-size: 0.62rem;

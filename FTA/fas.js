@@ -210,7 +210,8 @@ class Project {
 
     addGroup({ name, color, description, parentId = null,
                kind = 'group', level = null, mitigation = false,
-               elementType = null, hft = null, x = 0, y = 0 }) {
+               elementType = null, hft = null, claimedSff = null,
+               claimedCapability = null, x = 0, y = 0 }) {
         // A Mitigation element is a low-level architecture element with the
         // 'M' id prefix. Normalise: mitigation ⇒ element, low level.
         mitigation = !!mitigation && kind === 'element';
@@ -242,6 +243,15 @@ class Project {
             //   hft: hardware fault tolerance 0 | 1 | 2. Default 0.
             elementType: kind === 'element' ? ((elementType === 'A') ? 'A' : 'B') : null,
             hft:         kind === 'element' ? Math.max(0, Math.min(2, parseInt(hft, 10) || 0)) : null,
+            // Subsystem supplier claim (elements only; optional, both null by
+            // default). A black-box subsystem may carry the supplier's already-
+            // discharged result instead of being computed from internal modes:
+            //   claimedSff: 0..1 — stated safe-failure fraction, fed to Route 1ₕ.
+            //   claimedCapability: a CONFIG.targetCombined value ('SIL n'/'ASIL x')
+            //        — the certified integrity, used directly under its lens.
+            // Both are ASSUMPTIONS, flagged as such in the results/report.
+            claimedSff:        kind === 'element' ? (claimedSff != null ? fmt.clamp(claimedSff, 0, 1, null) : null) : null,
+            claimedCapability: kind === 'element' ? (claimedCapability || null) : null,
             x:           x || 0,
             y:           y || 0
         };
@@ -699,7 +709,9 @@ class Project {
                     name: el ? el.name : '—',
                     level: el ? (el.level || null) : null,
                     elementType: (el && el.elementType === 'A') ? 'A' : 'B',
-                    hft: el ? Math.max(0, Math.min(2, parseInt(el.hft, 10) || 0)) : 0
+                    hft: el ? Math.max(0, Math.min(2, parseInt(el.hft, 10) || 0)) : 0,
+                    claimedSff: (el && el.claimedSff != null) ? fmt.clamp(el.claimedSff, 0, 1, null) : null,
+                    claimedCapability: el ? (el.claimedCapability || null) : null
                 }));
             }
             const acc = byEl.get(elId);
@@ -725,6 +737,21 @@ class Project {
             // there; the ASIL has no such dependency and is stamped here.
             a.achievedAsil = fmt.achievedBand(a, true);
             if (isElement) a.achievedSil = fmt.achievedBand(a, false);
+            // Supplier claim (elements only): the element's integrity is the
+            // user's declaration, computed purely from it (Route 1ₕ on the
+            // claimed SFF, or the claimed capability used directly).
+            if (isElement && (a.claimedSff != null || a.claimedCapability)) {
+                const c = this._resolveClaim(a);
+                if (c.has) {
+                    a.claimed = true;
+                    a.claimSff = c.sff;
+                    a.claimCapability = a.claimedCapability || null;
+                    if (c.sff != null)          a.sff = c.sff;
+                    if (c.route1hSil != null)   a.route1hSil  = c.route1hSil;
+                    if (c.achievedSil != null)  a.achievedSil = c.achievedSil;
+                    if (c.achievedAsil != null) a.achievedAsil = c.achievedAsil;
+                }
+            }
             return a;
         };
         finalize(total, false);
@@ -839,11 +866,37 @@ class Project {
        Before v2.8.1 the band map and the element CARDS were computed from two
        different places (fmedaElementBands vs fmedaRollup), so an element could
        get a card with no band and a bare, unexplained "not yet computed". */
+    /* Resolve an element's declared integrity into a band, purely from the
+       user's declaration (Route 1ₕ on a claimed SFF with the element's Type/HFT,
+       or a claimed capability used directly). The architecture element relies
+       ONLY on this declaration — never on the functions' rates. If both a
+       claimed SFF and a claimed capability are given, the more limiting governs.
+       Returns { has, route1hSil, achievedSil, achievedAsil, sff }. */
+    _resolveClaim(el) {
+        const out = { has: false, route1hSil: null, achievedSil: null, achievedAsil: null, sff: null };
+        if (!el) return out;
+        const cap = el.claimedCapability || null;
+        const sff = (el.claimedSff != null && !isNaN(el.claimedSff))
+            ? fmt.clamp(el.claimedSff, 0, 1, null) : null;
+        if (!cap && sff == null) return out;
+        if (cap) {
+            out.has = true;
+            if (/^SIL/.test(cap)) { out.route1hSil = cap; out.achievedSil = cap; }
+            else                  { out.achievedAsil = cap; }   // QM / ASIL x
+        }
+        if (sff != null) {
+            out.has = true;
+            out.sff = sff;
+            const r1 = fmt.route1hMaxSil(el.elementType === 'A' ? 'A' : 'B', sff, el.hft);
+            out.route1hSil  = (out.route1hSil  == null) ? r1 : fmt.silMin(out.route1hSil, r1);
+            out.achievedSil = (out.achievedSil == null) ? r1 : fmt.silMin(out.achievedSil, r1);
+        }
+        return out;
+    }
+
     fmedaElementBandState(iso) {
         const out = {};
         if (this.mode !== 'FMEDA') return out;
-        const met = this.fmedaMetrics();
-        const byId = {}; met.elements.forEach(m => { if (m.id) byId[m.id] = m; });
         // Elements that own at least one failure mode (so they are "started").
         const hasModes = {};
         this.events.forEach(e => {
@@ -854,32 +907,21 @@ class Project {
         const set = (id, band, computed, reason) => {
             out[id] = { id, band, computed, reason };
         };
+        // An architecture element's SIL/ASIL is the integrity the user DECLARES
+        // for it (claimed SFF → Route 1ₕ with its Type/HFT, or a claimed
+        // capability used directly). It is NOT inferred from the functions or
+        // their metrics — the functions and failure modes carry the computed
+        // numbers; the element carries the engineering claim. No declaration ⇒
+        // the element shows no band ('undeclared'), only its functions/FMs.
         this.elementGroups().forEach(el => {
-            const isRollup = (el.level === 'top' || el.level === 'mid');
-            if (byId[el.id]) {                       // leaf with quantified metrics
-                set(el.id, fmt.achievedBand(byId[el.id], iso), true, 'leaf');
-                return;
+            if (el.claimedCapability || el.claimedSff != null) {
+                const c = this._resolveClaim(el);
+                const band = iso ? c.achievedAsil : c.achievedSil;
+                if (band) { set(el.id, band, true, 'claimed'); return; }
+                // e.g. a SFF-only claim under the ISO lens has no ASIL meaning.
+                set(el.id, null, false, 'undeclared'); return;
             }
-            if (!hasModes[el.id]) { set(el.id, null, false, 'empty'); return; }
-            if (!isRollup)        { set(el.id, null, false, 'no-rate'); return; }
-            const leaves = this.fmedaElementLeaves(el.id);
-            if (!leaves.length)   { set(el.id, null, false, 'unwired'); return; }
-            // Architectural cap = the most limiting Route 1ₕ among the low
-            // elements that own these subtree leaves.
-            let cap = null;
-            const owners = new Set();
-            leaves.forEach(id => {
-                const e = this.eventById(id);
-                const o = (e && e.groupId) ? this.elementOf(e.groupId) : null;
-                if (o) owners.add(o.id);
-            });
-            owners.forEach(oid => {
-                const r = byId[oid] && byId[oid].route1hSil;
-                if (r && r !== '—' && (cap == null || fmt.silRank(r) < fmt.silRank(cap))) cap = r;
-            });
-            const agg = this._fmedaAggregateLeaves(leaves, cap);
-            if (agg.count > 0) set(el.id, fmt.achievedBand(agg, iso), true, 'rollup');
-            else               set(el.id, null, false, 'unwired');
+            set(el.id, null, false, hasModes[el.id] ? 'undeclared' : 'empty');
         });
         return out;
     }
@@ -904,12 +946,26 @@ class Project {
     fmedaElementsForDisplay(iso) {
         const ru = this.fmedaRollup();
         const st = this.fmedaElementBandState(iso);
-        return ru.elements.map(e => {
+        const rows = ru.elements.map(e => {
             const s = st[e.id] || { band: null, computed: false, reason: 'empty' };
             return Object.assign({}, e, {
                 band: s.band, bandComputed: s.computed, bandReason: s.reason
             });
-        }).sort((a, b) => {
+        });
+        // A pure black-box subsystem (a supplier claim but no internal modes)
+        // won't be in the roll-up — append it so its claimed band still shows.
+        const present = new Set(rows.map(r => r.id));
+        this.elementGroups().forEach(el => {
+            if (present.has(el.id)) return;
+            const s = st[el.id];
+            if (!s || !s.computed || s.reason !== 'claimed') return;
+            rows.push({
+                id: el.id, name: el.name, level: el.level || null,
+                rawFit: 0, residualFit: 0, integrityFit: 0, pfh: 0,
+                band: s.band, bandComputed: true, bandReason: 'claimed'
+            });
+        });
+        return rows.sort((a, b) => {
             if (a.bandComputed !== b.bandComputed) return a.bandComputed ? -1 : 1;
             return a.integrityFit - b.integrityFit;
         });

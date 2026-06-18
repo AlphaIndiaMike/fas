@@ -157,6 +157,7 @@ const fmedaCanvas = (() => {
                         color: el.color,
                         level: el.level || '',
                         mit:   el.mitigation ? 1 : 0,
+                        claimed: (el.claimedCapability || el.claimedSff != null) ? 1 : 0,
                         netActive: activeNet === 'arch' ? 1 : 0
                     },
                     // Honour a saved position (dragged, or seeded on load);
@@ -414,6 +415,16 @@ const fmedaCanvas = (() => {
                 // Active-net element gets a stronger border.
                 selector: 'node[type="fmeda-element"][netActive=1]',
                 style: { 'border-width': 3 }
+            },
+            {
+                // User-DECLARED element (a claimed SFF / capability sets its
+                // band): a dashed indigo border + tint so it reads at a glance
+                // as "integrity asserted by the user", not computed.
+                selector: 'node[type="fmeda-element"][claimed=1]',
+                style: {
+                    'border-color': '#4F46E5', 'border-width': 2.5,
+                    'border-style': 'dashed', 'color': '#3730A3'
+                }
             },
             {
                 // Mitigation element (M_n): teal "barrier" treatment so it

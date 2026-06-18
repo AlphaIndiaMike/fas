@@ -802,13 +802,26 @@ const dialogs = (() => {
                 if (dc2  === 0)  a.push('no latent-fault check');
                 if (fmd  === 1)  a.push('single mode (FMD 100%)');
                 assume.innerHTML = a.length
-                    ? 'Assuming ' + a.join(', ') + ' — refine in the drawer above to raise the achievable integrity.'
+                    ? 'Assuming: ' + a.join(', ') + '. Refine in the drawer.'
                     : '';
             }
             const lamMode = base * fmd;
             const lamD = lamMode * dang, lamS = lamMode * (1 - dang);
             const lamDD = lamD * dc1,   lamDU = lamD * (1 - dc1);
             const pfh = lamDU * 1e-9;
+            // The two diagnostic coverages map directly onto the two ISO 26262
+            // hardware-architecture metrics — make that conversion explicit and
+            // live, because it is the single most confusing point of the model:
+            //   DC₁ (single-point) → SPFM ,  DC₂ (latent) → LFM.
+            const lamTot   = lamMode;                 // λD + λS for this mode
+            const hasSM    = dc1 > 0;
+            const lamSPF   = hasSM ? 0 : lamD;
+            const lamRF    = hasSM ? lamD * (1 - dc1) : 0;
+            const spfm     = lamTot > 0 ? 1 - (lamSPF + lamRF) / lamTot : null;
+            const mpfBase  = lamTot - lamRF;
+            const lamMPFl  = lamD * dc1 * (1 - dc2);
+            const lfm      = mpfBase > 0 ? 1 - lamMPFl / mpfBase : null;
+            const pc = x => (x == null ? '—' : Math.round(x * 100) + '%');
             // Single active-lens band — the residual rate this leaf contributes,
             // mapped to the active scale (no SIL/ASIL pair). This is a live
             // computation trace; the integrity VERDICT is rolled up to the
@@ -823,6 +836,7 @@ const dialogs = (() => {
                 '<br>λ<sub>DD</sub> = ' + fmt.fitStr(lamDD) +
                 ' · residual λ<sub>DU</sub> = <strong>' + fmt.fitStr(lamDU) + '</strong>' +
                 ' · PFH = ' + fmt.perHourStr(pfh) +
+                '<br>DC₁ → SPFM = <strong>' + pc(spfm) + '</strong> · DC₂ → LFM = <strong>' + pc(lfm) + '</strong>' +
                 '<br>residual reaches <strong>' + band + star + '</strong> (rolled up to its function / element)';
             return;
         }
@@ -1483,6 +1497,27 @@ const dialogs = (() => {
                 <div class="dlg-chips" id="fElTypeChips">${typeOpts}</div>
                 <div class="dlg-label">Hardware fault tolerance (HFT) ${_help('hft')}</div>
                 <div class="dlg-chips" id="fHftChips">${hftOpts}</div>`;
+            // Subsystem supplier claim — optional, for a black-box subsystem
+            // characterised by the supplier rather than by internal modes.
+            const claimSff = (g.claimedSff != null) ? fmt.pctInputVal(g.claimedSff) : '';
+            const capOpts = ['<option value="">— none —</option>'].concat(
+                CONFIG.targetCombined.map(t =>
+                    `<option value="${t.value}" ${g.claimedCapability === t.value ? 'selected' : ''}>${fmt.escHtml(t.label)}</option>`)
+            ).join('');
+            const claimOpen = (g.claimedSff != null || g.claimedCapability) ? ' open' : '';
+            fmedaFields += `
+                <details class="dlg-drawer" id="fClaimDrawer"${claimOpen}>
+                    <summary class="dlg-drawer-sum">Subsystem — supplier safety claim (optional) ${_help('subsystemClaim')}</summary>
+                    <div class="dlg-drawer-body">
+                        <div class="dlg-row">
+                            ${_field('Claimed SFF',
+                                `<div class="dlg-affix-wrap"><input class="dlg-inp" id="fClaimSff" type="number" min="0" max="100" step="0.001" value="${claimSff}"><span class="dlg-affix">%</span></div>`)}
+                            ${_field('Claimed capability',
+                                `<select class="dlg-inp" id="fClaimCap">${capOpts}</select>`)}
+                        </div>
+                        <div class="dlg-note dlg-note--flush">Both are treated as assumptions to validate against the supplier's safety manual / certificate, and are flagged as a claim in the results.</div>
+                    </div>
+                </details>`;
         }
 
         modal.open((existing ? 'Edit ' : 'New ') +
@@ -1592,6 +1627,15 @@ const dialogs = (() => {
         if (typeR) patch.elementType = (typeR.value === 'A') ? 'A' : 'B';
         const hftR = document.querySelector('input[name="fHft"]:checked');
         if (hftR) patch.hft = Math.max(0, Math.min(2, parseInt(hftR.value, 10) || 0));
+        // Subsystem supplier claim (elements only). Blank claimed SFF ⇒ null
+        // (compute from modes); a value is stored as a 0–1 fraction.
+        const claimSffEl = document.getElementById('fClaimSff');
+        if (claimSffEl) {
+            const raw = claimSffEl.value.trim();
+            patch.claimedSff = (raw === '') ? null : fmt.clamp(+raw / 100, 0, 1, null);
+        }
+        const claimCapEl = document.getElementById('fClaimCap');
+        if (claimCapEl) patch.claimedCapability = claimCapEl.value || null;
         const parentSel = document.getElementById('fParent');
         if (parentSel && parentSel.value) patch.parentId = parentSel.value;
 
@@ -1943,40 +1987,29 @@ const dialogs = (() => {
         }
         lines.push('');
 
-        // Elements — achieved integrity. Leaf elements: their aggregated random-
-        // hardware band. Mid/top roll-ups: the same metrics aggregated over the
-        // leaves that feed them (their subtree verdict). One source
-        // (fmedaElementBandState) so the report matches the canvas and right pane —
-        // including WHY an element has no band, and computed-first ordering.
+        // Elements — DECLARED integrity. An architecture element's SIL/ASIL is
+        // the integrity the user declares for it (a claimed SFF read through
+        // Route 1ₕ, or a claimed SIL/ASIL capability). It is NOT inferred from
+        // the functions; undeclared elements report no band. One source
+        // (fmedaElementsForDisplay) so the report matches the canvas and panel.
         lines.push('## Architecture elements (' + ru.elements.length + ')');
         if (!ru.elements.length) lines.push('- None defined.');
-        const metById = {};
-        m.elements.forEach(e => { if (e.id) metById[e.id] = e; });
-        const reasonText = (reason) =>
-            reason === 'unwired' ? ' (roll-up — failure net not yet wired from a low-level cause)'
-          : reason === 'no-rate' ? ' (no failure rate entered yet)'
-          : '';
         p.fmedaElementsForDisplay(iso).forEach(e => {
-            const leaf = !!metById[e.id];
-            const band = e.bandComputed ? e.band : 'not yet computed';
-            let capTxt = '';
-            if (!iso && e.bandComputed && e.bandReason === 'leaf') {
-                const me = metById[e.id];
-                const rateSil = me ? fmt.silForPfh(me.lambdaDU * 1e-9) : null;
-                if (me && me.route1hSil && me.route1hSil !== '—' &&
-                    fmt.silRank(me.route1hSil) < fmt.silRank(rateSil)) {
-                    capTxt = ' [limited by Route 1ₕ: Type ' + (me.elementType || 'B') +
-                             ', HFT ' + (me.hft || 0) + ', SFF ' +
-                             (me.sff == null ? '—' : Math.round(me.sff * 100) + '%') +
-                             '; rate alone → ' + rateSil + ']';
-                }
+            const grp = p.groupById ? p.groupById(e.id) : null;
+            let claimTxt = '';
+            if (grp) {
+                const bits = [];
+                if (grp.claimedCapability) bits.push('capability ' + grp.claimedCapability);
+                if (grp.claimedSff != null) bits.push('SFF ' + Math.round(grp.claimedSff * 100) + '%');
+                if (bits.length) claimTxt = ' [declared: ' + bits.join(', ') + ' — assumption to validate]';
             }
+            const band = e.bandComputed
+                ? 'declared integrity ' + e.band + claimTxt
+                : 'no integrity declared (set a claimed SFF or SIL/ASIL capability)';
             lines.push('- [' + e.id + '] ' + e.name +
                 (e.level ? ' (' + e.level + ')' : '') +
-                ' — achieved integrity ' + band + capTxt +
-                (e.bandComputed ? '' : reasonText(e.bandReason)) +
-                '; total residual ' + fmt.fitStr(e.residualFit) +
-                (leaf ? '' : ' (roll-up — subtree aggregate)'));
+                ' — ' + band +
+                '; total residual ' + fmt.fitStr(e.residualFit));
         });
         lines.push('');
 
