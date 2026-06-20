@@ -135,6 +135,11 @@ const catalog = (() => {
             { kind: 'fmeda-net-fail',
               icon: '⇄',  label: 'Failure link',
               hint: 'Connect failure ↔ failure. One source hitting two functions = common cause.' }
+        ]},
+        { group: 'Structure', help: null, items: [
+            { kind: 'domain',
+              icon: '▦',  label: 'Domain boundary',
+              hint: 'A visual-only boundary grouping architecture elements into a named domain. No effect on any rate or result.' }
         ]}
     ];
 

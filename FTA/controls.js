@@ -91,13 +91,6 @@ const controls = (() => {
 
             <div class="ctrl-section ctrl-summary" id="ctrlSummary"></div>
 
-            <div class="ctrl-section" id="ctrlWarningsSec">
-                <div class="ctrl-section-hd">Warnings</div>
-                <div id="ctrlWarnings" class="ctrl-warnings">
-                    <div class="ctrl-empty">No analysis available. Run Recalculate to compute results.</div>
-                </div>
-            </div>
-
             <div class="ctrl-section" id="ctrlScenariosSec">
                 <div class="ctrl-section-hd">Scenarios</div>
                 <div id="ctrlScenarios" class="ctrl-scenarios">
@@ -108,6 +101,17 @@ const controls = (() => {
             <div class="ctrl-section" id="ctrlBreakdownSec">
                 <div class="ctrl-section-hd">Event breakdown</div>
                 <div id="ctrlBreakdown" class="ctrl-breakdown">
+                    <div class="ctrl-empty">No analysis available. Run Recalculate to compute results.</div>
+                </div>
+            </div>
+
+            <!-- Warnings sit at the END (after the breakdown) so they follow the
+                 results instead of pushing them down; the Project foot stays last
+                 as the action anchor. _renderWarnings re-wires its handlers by id
+                 after each innerHTML, so the container can live anywhere here. -->
+            <div class="ctrl-section" id="ctrlWarningsSec">
+                <div class="ctrl-section-hd">Warnings</div>
+                <div id="ctrlWarnings" class="ctrl-warnings">
                     <div class="ctrl-empty">No analysis available. Run Recalculate to compute results.</div>
                 </div>
             </div>
@@ -667,6 +671,26 @@ const controls = (() => {
             const achieved = fmt.asilFromMetrics(pmhf, t.spfm, t.lfm);
             const tgt = (label, val, targets) =>
                 `${row(label, val)}<div class="res-m-tgt">target: ${targets}</div>`;
+            // Name the LIMITING metric — why it stops at `achieved`. Probe the
+            // next rung up (or ASIL B when stuck at A) and report which of
+            // SPFM / LFM / PMHF falls short, with the lever that raises it.
+            const isoT = { 'ASIL B': { spfm: 0.90, lfm: 0.60, pmhf: 1e-7 },
+                           'ASIL C': { spfm: 0.97, lfm: 0.80, pmhf: 1e-7 },
+                           'ASIL D': { spfm: 0.99, lfm: 0.90, pmhf: 1e-8 } };
+            const nextUp = { 'ASIL B': 'ASIL C', 'ASIL C': 'ASIL D', 'ASIL D': null };
+            const probe = (achieved === 'ASIL A' || achieved === 'QM') ? 'ASIL B' : nextUp[achieved];
+            let limiter = '';
+            if (probe) {
+                const T = isoT[probe], miss = [];
+                if (t.spfm != null && t.spfm < T.spfm)
+                    miss.push('SPFM ' + pct(t.spfm) + ' (needs ≥ ' + Math.round(T.spfm * 100) + '% — raise DC₁ or lower the dangerous fraction)');
+                if (t.lfm != null && t.lfm < T.lfm)
+                    miss.push('LFM ' + pct(t.lfm) + ' (needs ≥ ' + Math.round(T.lfm * 100) + '% — set the latent-fault coverage DC₂)');
+                if (pmhf >= T.pmhf)
+                    miss.push('PMHF ' + fmt.perHourStr(pmhf) + ' (needs &lt; ' + T.pmhf + ' /h — reduce λ or raise DC₁)');
+                if (miss.length)
+                    limiter = ` <strong>Limiting metric for ${probe}:</strong> ${miss.join('; and ')}.`;
+            }
             verdict = `<div class="res-section">ISO 26262 — hardware-architecture metrics</div>
                 <div class="res-card res-metrics-card">
                     ${tgt('PMHF (single-point + residual)', fmt.perHourStr(pmhf),
@@ -676,10 +700,10 @@ const controls = (() => {
                     ${tgt('LFM — latent-fault metric', pct(t.lfm),
                           'D ≥ 90% · C ≥ 80% · B ≥ 60%')}
                     <div class="res-m-verdict">${/^ASIL [BCD]$/.test(achieved)
-                        ? 'Meets the ISO 26262 random-hardware targets up to <strong>' + fmt.escHtml(achieved) + '</strong> — the highest ASIL whose PMHF, SPFM and LFM are <em>all</em> satisfied. This grades the random-hardware metrics only, not systematic capability or a HARA-assigned ASIL.'
+                        ? 'Meets the ISO 26262 random-hardware targets up to <strong>' + fmt.escHtml(achieved) + '</strong> — the highest ASIL whose PMHF, SPFM and LFM are <em>all</em> satisfied (this grades the random-hardware metrics only, not systematic capability or a HARA-assigned ASIL).' + limiter
                         : (achieved === 'ASIL A'
-                            ? 'Random-hardware metrics <strong>do not meet ASIL B</strong> (the lowest metric-gated ASIL); at this PMHF the item sits in the <strong>ASIL A</strong> band. ISO 26262-5 sets no quantitative SPFM/LFM target for ASIL A — confirm any ASIL A assignment via the HARA.'
-                            : 'Random-hardware metrics and PMHF do not reach any ASIL — <strong>QM</strong> (quality-managed only).')}</div>
+                            ? 'Random-hardware metrics <strong>do not meet ASIL B</strong> (the lowest metric-gated ASIL); at this PMHF the item sits in the <strong>ASIL A</strong> band.' + limiter + ' ISO 26262-5 sets no quantitative SPFM/LFM target for ASIL A — confirm any ASIL A assignment via the HARA.'
+                            : 'Random-hardware metrics and PMHF do not reach any ASIL — <strong>QM</strong> (quality-managed only).' + limiter)}</div>
                 </div>`;
         } else {
             const bandSil = fmt.silForPfh(t.lambdaDU * 1e-9);
@@ -752,9 +776,9 @@ const controls = (() => {
         // Single chip for the ACTIVE standard only. The two scales are never
         // shown as a pair, so "SIL 4 / ASIL D" can never appear together and be
         // misread as an equivalence — an ASIL D element does not satisfy SIL 4.
-        const bandChips = (pfh) => {
+        const bandChips = (pfh, bandOverride) => {
             if (iso) {
-                const asil = fmt.asilForPfh(pfh);
+                const asil = bandOverride || fmt.asilForPfh(pfh);
                 const lbl  = simple ? (CONFIG.simpleLabels.asil[asil] || asil) : asil;
                 const info = (asil === 'ASIL A')
                     ? ' title="Informative: ISO 26262 sets no quantitative PMHF target for ASIL A — it is assigned qualitatively from the HARA, not from this rate."'
@@ -764,72 +788,22 @@ const controls = (() => {
                 const mark = (asil === 'ASIL A') ? '*' : '';
                 return `<span class="ctrl-chip ctrl-chip-asil ${_asilClass(asil)}"${info}>${fmt.escHtml(lbl)}${mark}</span>`;
             }
-            const sil = fmt.silForPfh(pfh);
+            const sil = bandOverride || fmt.silForPfh(pfh);
             const lbl = simple ? (CONFIG.simpleLabels.sil[sil] || sil) : sil;
             return `<span class="ctrl-chip ctrl-chip-sil ${_silClass(sil)}">${fmt.escHtml(lbl)}</span>`;
         };
         // No-claim remark, phrased in the active standard's vocabulary.
-        const qmRemark = (pfh) => {
-            const noClaim = iso ? (fmt.asilForPfh(pfh) === 'QM')
-                                : (fmt.silForPfh(pfh) === 'No SIL');
+        const qmRemark = (pfh, bandOverride) => {
+            const b = bandOverride || (iso ? fmt.asilForPfh(pfh) : fmt.silForPfh(pfh));
+            const noClaim = iso ? (b === 'QM') : (b === 'No SIL');
             if (!noClaim) return '';
             return iso
-                ? `<div class="res-qm">QM — no ASIL rate target met at this rate.</div>`
+                ? `<div class="res-qm">QM — no ASIL metric target met at this rate.</div>`
                 : `<div class="res-qm">No SIL — no integrity claim at this rate.</div>`;
         };
 
         let html = '';
         const _proj = (cb.getProject && cb.getProject()) ? cb.getProject() : null;
-
-        // ── Checks: catch likely user/model errors and say so plainly. Kept
-        // deliberately small — high-signal, cheap to evaluate. Shown FIRST so a
-        // problem is seen before the numbers that depend on it.
-        const checks = [];
-        (rollup.functions || []).forEach(f => {
-            if (!isFinite(f.residualFit) || f.residualFit < 0)
-                checks.push({ lvl: 'error', msg: `Function ${f.name} (${f.id}) has an invalid residual rate — check its failure-mode inputs.` });
-        });
-        if (_proj && _proj.events) {
-            _proj.events.forEach(e => {
-                if (e.kind !== 'basic') return;
-                const dc   = +e.diagnosticCoverage || 0;
-                const base = +e.lambdaBase || +e.failureRateRaw || 0;
-                if (dc > 0 && base <= 0)
-                    checks.push({ lvl: 'warn', msg: `Failure mode "${e.name}" has diagnostic coverage but no failure rate — the coverage has no effect until a rate is entered.` });
-                const d = e.dangerousFraction;
-                if (d != null && (d < 0 || d > 1))
-                    checks.push({ lvl: 'warn', msg: `Failure mode "${e.name}" has a dangerous fraction outside 0–100%.` });
-            });
-        }
-        if (_proj && _proj.elementGroups) {
-            const minRes = {};
-            (rollup.functions || []).forEach(f => {
-                if (f.elementId == null) return;
-                if (minRes[f.elementId] == null || f.residualFit < minRes[f.elementId]) minRes[f.elementId] = f.residualFit;
-            });
-            const asilOrder = ['QM', 'ASIL A', 'ASIL B', 'ASIL C', 'ASIL D'];
-            _proj.elementGroups().forEach(g => {
-                const cap = g.claimedCapability;
-                if (!cap) return;
-                const res = minRes[g.id];
-                if (res == null) return;   // nothing to compare against yet
-                if (/^SIL/.test(cap)) {
-                    const r = fmt.silForPfh(res * 1e-9);
-                    if (fmt.silRank(cap) > fmt.silRank(r))
-                        checks.push({ lvl: 'warn', msg: `${g.name} (${g.id}) declares ${cap}, but its functions' rate supports only ${r}. Verify the supplier claim or the failure rates.` });
-                } else {
-                    const r = fmt.asilForPfh(res * 1e-9);
-                    if (asilOrder.indexOf(cap) > asilOrder.indexOf(r))
-                        checks.push({ lvl: 'warn', msg: `${g.name} (${g.id}) declares ${cap}, but its functions' rate supports only ${r}. Verify the supplier claim or the failure rates.` });
-                }
-            });
-        }
-        if (checks.length) {
-            html += `<div class="res-section">Checks</div>`;
-            checks.forEach(c => {
-                html += `<div class="res-check res-check--${c.lvl}">${c.lvl === 'error' ? '⛔' : '⚠'} ${fmt.escHtml(c.msg)}</div>`;
-            });
-        }
 
         // ── 0. FMEDA metrics: λ breakdown, SFF, SPFM/LFM ─────────────
         if (rollup.metrics && rollup.metrics.total &&
@@ -936,16 +910,20 @@ const controls = (() => {
 
         // ── 2. Functions: residual, integrity-first ──────────────────
         html += `<div class="res-section">Functions</div>`;
+        const _fnMet = {};
+        if (_proj) (_proj.fmedaMetrics().functions || []).forEach(fm => { _fnMet[fm.id] = fm; });
         rollup.functions.forEach(f => {
             const pfh = toPfh(f.residualFit);
+            const fmRec = _fnMet[f.id];
+            const fnBand = fmRec ? (iso ? fmRec.achievedAsil : fmRec.achievedSil) : null;
             const reduced = f.rawFit > 0
                 ? Math.round((1 - f.residualFit / f.rawFit) * 100) : 0;
             let body;
             if (simple) {
                 body = `
                     <div class="res-nums">achieved ${fmt.pfhDualStr(pfh)}</div>
-                    <div class="res-levels">${bandChips(pfh)}</div>
-                    ${qmRemark(pfh)}`;
+                    <div class="res-levels">${bandChips(pfh, fnBand)}</div>
+                    ${qmRemark(pfh, fnBand)}`;
             } else {
                 // Integrity-first, then the rate, then the reduction. When
                 // nothing was reduced we say so plainly instead of the
@@ -954,11 +932,11 @@ const controls = (() => {
                     ? `<span class="res-cut">−${reduced}% vs ${fitStr(f.rawFit)} raw</span>`
                     : `<span class="res-raw">No diagnostic credit (raw = residual)</span>`;
                 body = `
-                    <div class="res-levels">${bandChips(pfh)}</div>
+                    <div class="res-levels">${bandChips(pfh, fnBand)}</div>
                     <div class="res-nums">residual <strong>${fitStr(f.residualFit)}</strong>
                         &nbsp;·&nbsp; ${fmt.pfhDualStr(pfh)}</div>
                     <div class="res-pfh">${reductionLine}</div>
-                    ${qmRemark(pfh)}`;
+                    ${qmRemark(pfh, fnBand)}`;
             }
             const allUnhandled = f.handledCount === 0 && f.total > 0;
             const dInfo = f.derivedCount > 0
@@ -988,6 +966,18 @@ const controls = (() => {
                             <span class="res-el">(${fmt.escHtml(sr.elementName)} · ${fmt.escHtml(sr.functionName)})</span></div>
                         <div class="res-sr-mit">${fmt.escHtml(sr.mitigation)} <span class="res-raw">— ${sr.credited ? 'DC ' + Math.round(sr.dc * 100) + '%' : 'No diagnostic coverage credited'}</span></div>
                     </div>`;
+            });
+        }
+
+        // ── Checks: one shared, headless validation pass (engine-side, so it
+        // is testable and the demos can be asserted error-free). Shown LAST, at
+        // the end of the panel, so the warnings follow the numbers instead of
+        // pushing them down.
+        const checks = _proj ? _proj.fmedaValidate() : [];
+        if (checks.length) {
+            html += `<div class="res-section">Checks</div>`;
+            checks.forEach(c => {
+                html += `<div class="res-check res-check--${c.level}">${c.level === 'error' ? '⛔' : '⚠'} ${fmt.escHtml(c.msg)}</div>`;
             });
         }
 

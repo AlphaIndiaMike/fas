@@ -22,6 +22,7 @@ const main = (() => {
             onEventClick:     id => dialogs.openEventEdit(id),
             onGateClick:      id => dialogs.openGateEdit(id, null),
             onGroupClick:     id => dialogs.openGroupEdit(id),
+            onDomainClick:    id => dialogs.openDomainEdit(id),
             onLinkClick:      id => dialogs.openLinkEdit(id),
             onFmedaNodeClick: _onFmedaNodeClick,
             onNetEdgeClick:   _onNetEdgeClick,
@@ -95,6 +96,15 @@ const main = (() => {
                                     _modelChanged();
                                   },
             applyGroupDelete:     id => { project.deleteGroup(id);   _modelChanged(); },
+            applyDomainSave:      (id, d) => {
+                                    // Visual-only: a domain never touches a rate
+                                    // or band, so the model is "changed" for the
+                                    // dirty flag + redraw, but results are intact.
+                                    const dom = id ? project.updateDomain(id, d) : project.addDomain(d);
+                                    _modelChanged();
+                                    return dom ? dom.id : null;
+                                  },
+            applyDomainDelete:    id => { project.deleteDomain(id); _modelChanged(); },
             applyCopyFailureModes: (targetFnId, sourceIds) => {
                                     (sourceIds || []).forEach(sid =>
                                         project.copyFailureModeInto(sid, targetFnId));
@@ -450,6 +460,9 @@ const main = (() => {
                 break;
             case 'group':
                 dialogs.openGroupEdit(null);
+                break;
+            case 'domain':
+                dialogs.openDomainEdit(null);
                 break;
             case 'scenario':
                 dialogs.openScenarioEdit(null);

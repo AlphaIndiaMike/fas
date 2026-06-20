@@ -68,7 +68,9 @@ const canvas = (() => {
             const t = n.data('type');
             if (t === 'event' && api.onEventClick) api.onEventClick(n.id());
             if (t === 'gate'  && api.onGateClick)  api.onGateClick(n.id());
-            if (t === 'group' && api.onGroupClick) api.onGroupClick(n.id());
+            if (t === 'group' && n.data('domain') && api.onDomainClick) api.onDomainClick(n.id());
+            else if (t === 'group' && api.onGroupClick) api.onGroupClick(n.id());
+            if (t === 'fmeda-domain' && api.onDomainClick) api.onDomainClick(n.id());
             // FMEDA nodes route through one callback so main.js can either
             // complete an in-progress net link or open the right editor.
             if ((t === 'fmeda-element' || t === 'fmeda-function' ||
@@ -365,6 +367,20 @@ const canvas = (() => {
             });
         });
 
+        // Domain boundaries (visual only): compound parents that bound their
+        // member events. An event already inside an FFI group keeps that as its
+        // compound parent (a node can have only one), so domains wrap the rest.
+        const evDomain = {};   // eventId -> domainId
+        (project.domains || []).forEach(dom => {
+            els.push({
+                group: 'nodes',
+                data: { id: dom.id, type: 'group', label: dom.name || 'Domain',
+                        color: dom.color, bg: dom.color, domain: 1 },
+                selectable: true
+            });
+            (dom.members || []).forEach(mid => { evDomain[mid] = dom.id; });
+        });
+
         project.events.forEach((e, i) => {
             const pos = (e.x || e.y) ? { x: e.x, y: e.y } : _gridSpot(i);
             const data = {
@@ -375,6 +391,8 @@ const canvas = (() => {
             };
             if (e.groupId && project.groupById(e.groupId)) {
                 data.parent = e.groupId;
+            } else if (evDomain[e.id]) {
+                data.parent = evDomain[e.id];
             }
             els.push({
                 group: 'nodes',

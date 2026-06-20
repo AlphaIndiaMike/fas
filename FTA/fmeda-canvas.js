@@ -63,9 +63,10 @@ const fmedaCanvas = (() => {
         // changelog):
         //   · a FAILURE MODE shows its FIT only — a mode is classified and
         //     counted, it is NOT assigned an integrity level, so no band.
-        //   · a FUNCTION shows its residual FIT and the rate-band that rate
-        //     reaches (the informative per-function integrity; functions have
-        //     no SPFM/LFM of their own). Read from the residual roll-up.
+        //   · a FUNCTION shows its residual FIT and its METRIC-gated band
+        //     (PMHF·SPFM·LFM under ISO) over its own modes — the same basis as
+        //     the element and system, so it never disagrees on a rate-only
+        //     technicality. Read from fmedaMetrics().functions.
         //   · an ELEMENT shows ONLY its achieved integrity band, from
         //     `fmedaElementBands`: a LEAF (low) element from its AGGREGATED
         //     random-hardware metrics; a ROLL-UP (mid/top) element from those
@@ -76,6 +77,8 @@ const fmedaCanvas = (() => {
         //     summed FIT is not shown (that detail lives in the right pane).
         const roll   = project.fmedaRollup();
         const fnRoll = {}; roll.functions.forEach(f => { fnRoll[f.id] = f; });
+        const _met   = project.fmedaMetrics();
+        const fnMet  = {}; (_met.functions || []).forEach(f => { fnMet[f.id] = f; });
         const elBands = project.fmedaElementBands(iso);
 
         // ── Deterministic absolute layout ────────────────────────────────
@@ -116,6 +119,20 @@ const fmedaCanvas = (() => {
                          (fns.length - 1) * 24;
             return PAD_TOP_EL + body + 24;
         }
+
+        // ── Domain boundaries (visual only) ──────────────────────────────
+        // A domain is a compound parent that auto-bounds its member elements.
+        // Members live on the domain, so this never affects any computed value.
+        const elDomain = {};   // elementId -> domainId
+        (project.domains || []).forEach(dom => {
+            els.push({
+                group: 'nodes',
+                data: { id: dom.id, type: 'fmeda-domain', label: dom.name || 'Domain',
+                        color: dom.color, bg: dom.color },
+                selectable: true
+            });
+            (dom.members || []).forEach(mid => { elDomain[mid] = dom.id; });
+        });
 
         // ── Elements, left→right by level, stacked top→bottom in a column ──
         const byLevel = { top: [], mid: [], low: [] };
@@ -158,7 +175,8 @@ const fmedaCanvas = (() => {
                         level: el.level || '',
                         mit:   el.mitigation ? 1 : 0,
                         claimed: (el.claimedCapability || el.claimedSff != null) ? 1 : 0,
-                        netActive: activeNet === 'arch' ? 1 : 0
+                        netActive: activeNet === 'arch' ? 1 : 0,
+                        ...(elDomain[el.id] ? { parent: elDomain[el.id] } : {})
                     },
                     // Honour a saved position (dragged, or seeded on load);
                     // only seed the computed column slot when none exists.
@@ -191,13 +209,17 @@ const fmedaCanvas = (() => {
                 fnOrigin[fn.id] = (fn.x || fn.y)
                     ? { x: fn.x - FN_W / 2, yTop: fn.y - h / 2 }
                     : { x, yTop: yCursor };
-                // Function headline: its residual FIT and the integrity band
-                // that rate reaches, in the active lens. A function with no
-                // failure modes has no roll-up entry, so it shows no line.
+                // Function headline: its residual FIT and the integrity band it
+                // achieves — METRIC-GATED (PMHF·SPFM·LFM under ISO), the same
+                // basis as the element/system, so a function never disagrees
+                // with the top-level verdict on a rate-only technicality. A
+                // function with no failure modes has no roll-up entry → no line.
                 const fr = fnRoll[fn.id];
+                const fmm = fnMet[fn.id];
+                const fnBand = fmm ? (iso ? fmm.achievedAsil : fmm.achievedSil)
+                                   : (fr ? bandFor(fr.residualFit * 1e-9) : '');
                 const fnMetric = fr
-                    ? fmt.fitStr(fr.residualFit) + ' · ' +
-                      bandFor(fr.residualFit * 1e-9)
+                    ? fmt.fitStr(fr.residualFit) + ' · ' + fnBand
                     : '';
                 els.push({
                     group: 'nodes',
@@ -394,6 +416,34 @@ const fmedaCanvas = (() => {
     /* Cytoscape style rules specific to FMEDA. Merged into canvas styles. */
     function swimlaneStyles() {
         return [
+            /* Domain boundary — a dashed, labelled compound that bounds its
+               member elements. Visual grouping only. */
+            {
+                selector: 'node[type="fmeda-domain"]',
+                style: {
+                    'shape':              'round-rectangle',
+                    'background-color':   'data(bg)',
+                    'background-opacity': 0.06,
+                    'border-color':       'data(color)',
+                    'border-width':       2,
+                    'border-style':       'dashed',
+                    'border-opacity':     0.7,
+                    'label':              'data(label)',
+                    'text-valign':        'top',
+                    'text-halign':        'left',
+                    'text-margin-x':      10,
+                    'text-margin-y':      -6,
+                    'font-family':        'Outfit, sans-serif',
+                    'font-size':          11,
+                    'font-weight':        700,
+                    'color':              'data(color)',
+                    'letter-spacing':     1.2,
+                    'text-transform':     'uppercase',
+                    'padding':            '26px',
+                    'z-compound-depth':   'bottom',
+                    'compound-sizing-wrt-labels': 'include'
+                }
+            },
             {
                 selector: 'node[type="fmeda-element"]',
                 style: {

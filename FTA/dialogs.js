@@ -374,24 +374,42 @@ const dialogs = (() => {
         const pfh = res * 1e-9;
         // Single active-lens band (no "SIL / ASIL" pair — that false
         // equivalence is avoided everywhere the tool reports integrity).
-        const band = (p.standard !== 'IEC61508') ? fmt.asilForPfh(pfh) : fmt.silForPfh(pfh);
+        // METRIC-GATED under ISO (from the leaves feeding this effect), so it
+        // agrees with the function/system instead of a rate-only ASIL B.
+        const band = p.fmedaModeBand(existing.id, p.standard !== 'IEC61508');
         if (!(raw > 0)) {
             return `<div class="dlg-note">No contributing failure modes are
                 linked to this effect yet. Link the lower-level failure modes
                 that lead to it on the failure network; its failure rate and
                 diagnostic coverage follow from them.</div>`;
         }
+        // Name the actual contributing causes so the user knows EXACTLY which
+        // leaf to edit — the values here are inherited, never entered here.
+        const causes = p.failIncoming(existing.id).map(ed => {
+            const c = p.eventById(ed.from);
+            const owner = c && c.groupId ? p.elementOf(c.groupId) : null;
+            return c
+                ? `<li>${fmt.escHtml(c.name)} <span class="dlg-cause-id">${fmt.escHtml(c.id)}</span>` +
+                  (owner ? ` <span class="dlg-cause-el">in ${fmt.escHtml(owner.name)}</span>` : '') + `</li>`
+                : `<li>${fmt.escHtml(ed.from)}</li>`;
+        });
+        const causeBlock = causes.length
+            ? `<div class="dlg-label">Caused by — edit these to change the numbers</div>
+               <ul class="dlg-cause-list">${causes.join('')}</ul>`
+            : '';
         return `
             <div class="dlg-readonly">
                 <div class="dlg-ro-row"><span>Incoming rate (before mitigation)</span><strong>${fmt.fitStr(raw)}</strong></div>
                 <div class="dlg-ro-row"><span>Residual rate</span><strong>${fmt.fitStr(res)}</strong></div>
                 <div class="dlg-ro-row"><span>Diagnostic coverage</span><strong>${Math.round(dc * 100)}%</strong></div>
                 <div class="dlg-ro-row"><span>Achieved integrity</span><strong>${fmt.pfhDualStr(pfh)} · ${band}</strong></div>
-                <div class="dlg-note">Determined by the
-                    contributing lower-level failure modes and their mitigations.
-                    Strengthen the diagnostics on those failure modes to improve
-                    these figures.</div>
-            </div>`;
+                <div class="dlg-note">Derived effect — these figures are <em>inherited</em>
+                    from the contributing lower-level (leaf) failure modes through
+                    the failure net; they are <strong>not entered here</strong>. To change
+                    them, edit the leaf failure mode(s) below and strengthen their
+                    diagnostics.</div>
+            </div>
+            ${causeBlock}`;
     }
 
     /* pickList items for the FMEDA failure-mode Function picker: every
@@ -581,6 +599,10 @@ const dialogs = (() => {
         // Rate unit: stored in FIT, optionally entered/shown as /h (PFH).
         const unit = (e.lambdaUnit === 'ph') ? 'ph' : 'fit';
         const lamShown = (unit === 'ph') ? (lam * 1e-9) : lam;
+        // λ + DC₁ are the only inputs a user must touch; everything else
+        // (dangerous fraction, FMD, latent coverage DC₂, mission time) is folded
+        // into an optional drawer with conservative defaults. The live readout
+        // (#fLive) states the DC₁ → SPFM and DC₂ → LFM conversion explicitly.
         return `
             <div class="dlg-row">
                 ${_field('Base failure rate, λ ' + _help('lambdaBase'),
@@ -827,7 +849,7 @@ const dialogs = (() => {
             // computation trace; the integrity VERDICT is rolled up to the
             // function and element, not claimed for the individual mode.
             const isoLens = (project.standard !== 'IEC61508');
-            const band = isoLens ? fmt.asilForPfh(pfh) : fmt.silForPfh(pfh);
+            const band = isoLens ? fmt.asilFromMetrics(pfh, spfm, lfm) : fmt.silForPfh(pfh);
             const star = (band === 'ASIL A') ? '*' : '';
             live.innerHTML =
                 'λ<sub>mode</sub> = ' + fmt.fitStr(lamMode) +
@@ -1949,6 +1971,13 @@ const dialogs = (() => {
         // regardless of lens, as data; only the integrity VERDICTS follow it.
         const iso = (p.standard !== 'IEC61508');
         const bandRate = fit => iso ? fmt.asilForPfh(fit * 1e-9) : fmt.silForPfh(fit * 1e-9);
+        // Per-function metric-gated bands (same basis as the canvas / system).
+        const _fnMet = {};
+        (p.fmedaMetrics().functions || []).forEach(fm => { _fnMet[fm.id] = fm; });
+        const fnBandOf = f => {
+            const fm = _fnMet[f.id];
+            return fm ? (iso ? fm.achievedAsil : fm.achievedSil) : bandRate(f.residualFit);
+        };
         lines.push('Mode: FMEDA · Mission time: ' + p.missionTime + ' h');
         lines.push('Integrity lens: ' + (iso ? 'ISO 26262 (ASIL)' : 'IEC 61508 (SIL)'));
         lines.push('');
@@ -2018,7 +2047,7 @@ const dialogs = (() => {
         ru.functions.forEach(f => {
             lines.push('- [' + f.id + '] ' + f.name + '  (' + f.elementName + ')');
             lines.push('   - Residual: ' + fmt.fitStr(f.residualFit) + ' = ' + pfhStr(f.residualFit) +
-                '  →  ' + bandRate(f.residualFit));
+                '  →  ' + fnBandOf(f));
             lines.push('   - Raw: ' + fmt.fitStr(f.rawFit) +
                 ' · handled ' + f.handledCount + '/' + f.total +
                 (f.derivedCount ? ' · derived ' + f.derivedCount : ''));
@@ -2185,9 +2214,84 @@ const dialogs = (() => {
         ]);
     }
 
+    /* ── Domain boundary editor (v3.3.0) ─────────────────────────────────
+       A purely-visual grouping of top-level nodes — architecture elements in
+       FMEDA, events in FTA/ETA. Same modal shape as the group editor (name +
+       colour + member picker), but it writes to the project's `domains` layer,
+       which no metric or analysis ever reads. */
+    function _domainMemberItems(p) {
+        if (p.mode === 'FMEDA')
+            return p.elementGroups().map(el => ({ value: el.id, idText: el.id, name: el.name || el.id }));
+        // FTA / ETA: the diagram's own nodes are events.
+        return p.events.map(e => ({ value: e.id, idText: e.id, name: e.name || e.id }));
+    }
+
+    function openDomainEdit(domainId) {
+        const p = api.getProject();
+        if (!p) return;
+        const existing = domainId ? p.domainById(domainId) : null;
+        const d = existing || {
+            id: null, name: '',
+            color: CONFIG.groupColors[p.domains.length % CONFIG.groupColors.length],
+            members: []
+        };
+        const members = (existing ? existing.members : []).slice();
+        const nodeWord = p.mode === 'FMEDA' ? 'elements' : 'events';
+
+        const swatches = CONFIG.groupColors.map(c =>
+            `<label class="dlg-swatch" style="background:${c}">
+                <input type="radio" name="dColor" value="${c}" ${c === d.color ? 'checked' : ''}>
+            </label>`).join('');
+
+        modal.open((existing ? 'Edit ' : 'New ') + 'domain boundary', `
+            ${_errBox()}
+            ${_field('Name',
+                `<input class="dlg-inp" id="dName" type="text" maxlength="40" value="${fmt.escHtml(d.name)}">`,
+                'Visible label on the boundary drawn around the chosen ' + nodeWord + '.')}
+            <div class="dlg-label">Color</div>
+            <div class="dlg-swatches">${swatches}</div>
+            ${_field('Members — ' + nodeWord,
+                picklist.create({ id: 'dMembers', items: _domainMemberItems(p),
+                            selected: members, multi: true,
+                            placeholder: 'Search ' + nodeWord + '…' }),
+                'A node belongs to at most one domain. This is a visual grouping only — it never changes any rate, metric or result.')}
+        `, [
+            ...(existing ? [{
+                label: 'Delete', cls: 'btn-danger',
+                onClick: () => confirm('Delete domain boundary?',
+                    'Remove "' + (existing.name || 'this domain') + '". The ' + nodeWord + ' inside it are not affected.',
+                    () => { api.applyDomainDelete(existing.id); modal.close(); })
+            }] : []),
+            { label: 'Cancel', cls: 'btn-sec', onClick: modal.close },
+            {
+                label: existing ? 'Save' : 'Create', cls: 'btn-primary',
+                onClick: () => {
+                    const name = (document.getElementById('dName').value || '').trim();
+                    const colorEl = document.querySelector('input[name="dColor"]:checked');
+                    const color = colorEl ? colorEl.value : d.color;
+                    const picked = picklist.values('dMembers');
+                    api.applyDomainSave(existing ? existing.id : null,
+                        { name, color, members: picked });
+                    modal.close();
+                }
+            }
+        ]);
+
+        document.querySelectorAll('.dlg-swatch input').forEach(r => {
+            r.addEventListener('change', () => {
+                document.querySelectorAll('.dlg-swatch').forEach(s =>
+                    s.classList.toggle('dlg-swatch-on', s.querySelector('input').checked));
+            });
+        });
+        document.querySelectorAll('.dlg-swatch').forEach(s =>
+            s.classList.toggle('dlg-swatch-on', s.querySelector('input').checked));
+        picklist.wire('dMembers');
+    }
+
     return {
         init,
         openEventEdit, openGateEdit, openLinkEdit, openGroupEdit, openScenarioEdit,
+        openDomainEdit,
         openNewProject, openRename, openExport, openHelp,
         confirm
     };

@@ -779,6 +779,17 @@ body {
 .modal-x:hover { color: #fffefb; background: rgba(255,235,160,0.14); }
 
 .modal-body { padding: 1rem 1.1rem; max-height: 75vh; overflow-y: auto; }
+
+/* Change #3 — a dialog whose LAST field is a pickList (the domain / group
+   boundary editor's "Members" multi-select) opens its dropdown DOWNWARD from a
+   trigger sitting at the very bottom of the body. .modal{overflow:hidden} would
+   clip that panel, and the flip-up in picklist.js only fires near the SCREEN
+   edge — so on a short modal centred in a tall window the open panel had nowhere
+   to go. Reserve a ~120px run-off inside the scrollable body, giving the panel
+   room to open: an effective minimum height under the last control. Scoped with
+   :has() (already used elsewhere in this sheet) so it touches ONLY dialogs that
+   genuinely end in a pickList — the domain editor — and nothing else. */
+.modal-body:has(> .dlg-field:last-child .picklist) { padding-bottom: 120px; }
 .modal-foot {
     display: flex; justify-content: flex-end; gap: 0.5rem;
     padding: 0.8rem 1.1rem;
@@ -1659,6 +1670,13 @@ textarea.dlg-inp { font-family: 'Outfit', sans-serif; resize: vertical; }
 }
 .res-check--warn  { color: #8a5a12; background: #faf0dc; border-color: #d49a2a; }
 .res-check--error { color: #8a1f1f; background: #fbe6e6; border-color: #cc3333; }
+.dlg-cause-list { margin: 4px 0 8px; padding-left: 18px; font-size: 0.78rem; }
+.dlg-cause-list li { margin: 2px 0; }
+.dlg-cause-id {
+    font-family: 'JetBrains Mono', monospace; font-size: 0.68rem;
+    color: #4F46E5; background: #eef0fb; border-radius: 3px; padding: 0 4px;
+}
+.dlg-cause-el { font-size: 0.7rem; color: #777; }
 .res-sr-card { background: #f7faf3; }
 .res-sr-id {
     font-family: 'JetBrains Mono', monospace; font-size: 0.62rem;
