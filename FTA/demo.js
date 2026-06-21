@@ -172,7 +172,7 @@ const demo = (function () {
     /* ═══════════════════════════════════════════════════════════════
        FMEDA (worked PASS) — the same brake-by-wire controller, built as a
        design that MEETS a quantitative ISO 26262 target. This is the single
-       FMEDA reference offered in the UI (Load reference). The earlier
+       FMEDA reference offered in the UI (Load Demo). The earlier
        must-stay-QM calibration model is no longer shipped; it lives in the
        test suite as a fixture.
 
@@ -297,6 +297,36 @@ const demo = (function () {
 
         // Common cause: the ALU fault also drives the top effect directly.
         p.addNetEdge({ net: 'fail', from: alu.id, to: lossBraking.id });
+
+        // ── Architecture net (element ↔ element) ───────────────────────────
+        //    The physical signal path: the four low-level elements feed the
+        //    mid-level Brake ECU, which drives the top-level system. This is the
+        //    SAME shape as the failure net one layer up, so every cross-element
+        //    failure path runs along an interface the architecture actually has
+        //    (and the structural monitors stay silent). Visual only — no metric
+        //    reads it; it exists so the architecture-net toggle reads as a real
+        //    block diagram, not an empty canvas.
+        p.addNetEdge({ net: 'arch', from: senA.id, to: ecu.id });
+        p.addNetEdge({ net: 'arch', from: senB.id, to: ecu.id });
+        p.addNetEdge({ net: 'arch', from: mcu.id,  to: ecu.id });
+        p.addNetEdge({ net: 'arch', from: pwr.id,  to: ecu.id });
+        p.addNetEdge({ net: 'arch', from: ecu.id,  to: sys.id });
+
+        // ── Function net (function ↔ function) ─────────────────────────────
+        //    The functional decomposition that mirrors the failure net: which
+        //    function feeds which. Sensing and control form the brake command;
+        //    the power rail sustains command availability; both ECU functions
+        //    converge on the system's braking function, and the controller's
+        //    "execute control loop" also reaches it directly (the common-cause
+        //    path, expressed at the function level). Visual only — no metric
+        //    reads it.
+        p.addNetEdge({ net: 'func', from: senAFn.id, to: cmdFn.id });
+        p.addNetEdge({ net: 'func', from: senBFn.id, to: cmdFn.id });
+        p.addNetEdge({ net: 'func', from: mcuFn.id,  to: cmdFn.id });
+        p.addNetEdge({ net: 'func', from: pwrFn.id,  to: availFn.id });
+        p.addNetEdge({ net: 'func', from: cmdFn.id,   to: brakeFn.id });
+        p.addNetEdge({ net: 'func', from: availFn.id, to: brakeFn.id });
+        p.addNetEdge({ net: 'func', from: mcuFn.id,   to: brakeFn.id });
 
         return p;
     }

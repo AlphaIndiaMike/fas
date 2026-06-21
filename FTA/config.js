@@ -13,8 +13,8 @@ const CONFIG = {
        and stamped into exported reports / saved projects. BUMP THIS ON
        EVERY ITERATION of development — patch for fixes, minor for new
        features, major for breaking changes. */
-    appVersion:  '3.3.1',
-    releaseDate: '2026-06-20',
+    appVersion:  '3.4.0',
+    releaseDate: '2026-06-21',
 
     /* JSON file-format version. v2 added direct links; v3 was an earlier
        (now removed) ETA experiment; v4 stores two fully independent

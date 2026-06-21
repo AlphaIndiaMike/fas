@@ -1830,7 +1830,7 @@ const dialogs = (() => {
         const footer = [];
         if (typeof onDemo === 'function') {
             footer.push({
-                label: 'Load reference', cls: 'btn-sec btn-left',
+                label: 'Load Demo', cls: 'btn-sec btn-left',
                 onClick: () => {
                     const m = pickedMode();
                     // FMEDA has one canonical reference: the worked brake-by-wire
@@ -1859,7 +1859,7 @@ const dialogs = (() => {
                     <option value="ETA">ETA — Event Tree Analysis</option>
                     <option value="FMEDA">FMEDA — Failure Modes, Effects &amp; Diagnostics</option>
                 </select>`,
-                'Pick the kind of analysis. <strong>Load reference</strong> opens a ' +
+                'Pick the kind of analysis. <strong>Load Demo</strong> opens a ' +
                 'worked example of this type to learn from or build on; ' +
                 '<strong>Create</strong> starts an empty one. You can switch type later.')}
             ${_field('Project name',
@@ -1874,7 +1874,7 @@ const dialogs = (() => {
                 `<input class="dlg-inp" id="fMT" type="number" min="1" step="1" value="${CONFIG.defaultMissionTime}">`,
                 'Operating duration over which the failure probability accumulates.')}
             ${typeof onDemo === 'function'
-                ? '<div class="dlg-note">New here? Pick an analysis type and press <strong>Load reference</strong> for a worked example that exercises every feature — it opens untitled, so you can rename it and make it your own.</div>'
+                ? '<div class="dlg-note">New here? Pick an analysis type and press <strong>Load Demo</strong> for a worked example that exercises every feature — it opens untitled, so you can rename it and make it your own.</div>'
                 : ''}
         `, footer);
 
@@ -1905,7 +1905,7 @@ const dialogs = (() => {
             ${_field('Project name',
                 `<input class="dlg-inp" id="fRename" type="text" maxlength="60"
                         placeholder="e.g. Brake-by-wire FTA" value="${fmt.escHtml(current || '')}">`,
-                'A reference opens untitled — give it a name to make it your own. ' +
+                'A demo opens untitled — give it a name to make it your own. ' +
                 'Leave blank to keep it untitled.')}
         `, [
             { label: 'Cancel', cls: 'btn-sec', onClick: modal.close },
@@ -2076,12 +2076,17 @@ const dialogs = (() => {
         const srs = p.safetyRequirements();
         lines.push('## Safety requirements (' + srs.length + ')');
         if (!srs.length) lines.push('- None. A requirement is listed for each low-level failure mode that has a written mitigation.');
+        // Each requirement inherits, at the end of its text, the integrity
+        // DECLARED on its element — " (ASIL C)" / " (SIL 3)" under the report's
+        // lens; undeclared elements and empty text add nothing.
+        const _srBands = p.fmedaElementBands(iso);
         srs.forEach(sr => {
             lines.push('- ' + sr.srId + ' [' + sr.eventId + '] — ' + sr.elementName +
                 ' · ' + sr.functionName + ' · ' + sr.name);
             lines.push('   - ' + (sr.credited ? 'DC ' + Math.round(sr.dc * 100) + '%'
                                               : 'no diagnostic coverage credited') +
-                ' — ' + sr.mitigation);
+                ' — ' + sr.mitigation +
+                fmt.mitigationBandSuffix(sr.mitigation, _srBands[sr.elementId]));
         });
         lines.push('');
 

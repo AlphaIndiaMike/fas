@@ -33,13 +33,15 @@
         <button class="btn btn-outline drawer-btn" id="drawerCatalog"
                 title="Show catalog">☰ Catalog</button>
         <button class="btn btn-outline" onclick="main.newProject()">+ New</button>
-        <button class="btn btn-outline" onclick="main.triggerUpload()">↑ Load</button>
-        <button class="btn btn-primary" onclick="main.downloadProject()">↓ Save</button>
+        <button class="btn btn-outline" onclick="main.triggerUpload()"
+                title="Open a saved project (.fas file)">↑ Load</button>
+        <button class="btn btn-primary" onclick="main.downloadProject()"
+                title="Save this project as a .fas file">↓ Save</button>
         <button class="btn btn-outline" onclick="main.exportReport()"
                 title="Export analysis report (Markdown)">⎘ Report</button>
         <button class="btn btn-outline drawer-btn" id="drawerControls"
                 title="Show analysis panel">Analysis ☰</button>
-        <input type="file" id="fileInput" accept=".json" style="display:none">
+        <input type="file" id="fileInput" accept=".fas,.json" style="display:none">
     </div>
 </header>
 
@@ -60,11 +62,12 @@
         <span><span class="rule-num">03 —</span> Press <strong>Recalculate</strong> to roll results up and read the integrity level</span>
     </div>
     <div class="intro-note">
-        New here? Press <strong>New Project</strong> and <strong>Load reference</strong>
+        New here? Press <strong>New Project</strong> and <strong>Load Demo</strong>
         for a worked example of any analysis — it opens untitled, ready to make your own.
     </div>
     <div class="intro-btns">
-        <button class="btn btn-sec"     onclick="main.triggerUpload()">↑ Load Project</button>
+        <button class="btn btn-sec"     onclick="main.triggerUpload()"
+                title="Open a saved project (.fas file)">↑ Load Project</button>
         <button class="btn btn-primary" onclick="main.newProject()">+ New Project</button>
     </div>
 </div>

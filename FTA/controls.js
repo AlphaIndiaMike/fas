@@ -958,13 +958,21 @@ const controls = (() => {
                 ? cb.getProject().safetyRequirements() : []);
         if (srs.length) {
             html += `<div class="res-section">Safety requirements</div>`;
+            // Each requirement inherits, at the end of its text, the integrity
+            // DECLARED on the element it lives in — " (ASIL C)" / " (SIL 3)" under
+            // the active lens. Undeclared elements (no band) and empty text add
+            // nothing. fmedaElementBands omits undeclared elements, so a missing
+            // key already means "no suffix".
+            const _srBands = _proj ? _proj.fmedaElementBands(iso) : {};
             srs.forEach(sr => {
+                const _mit = fmt.escHtml(sr.mitigation) +
+                    fmt.mitigationBandSuffix(sr.mitigation, _srBands[sr.elementId]);
                 html += `
                     <div class="res-card res-sr-card">
                         <div class="res-fn"><span class="res-sr-id">${fmt.escHtml(sr.srId)}</span>
                             ${fmt.escHtml(sr.name)}
                             <span class="res-el">(${fmt.escHtml(sr.elementName)} · ${fmt.escHtml(sr.functionName)})</span></div>
-                        <div class="res-sr-mit">${fmt.escHtml(sr.mitigation)} <span class="res-raw">— ${sr.credited ? 'DC ' + Math.round(sr.dc * 100) + '%' : 'No diagnostic coverage credited'}</span></div>
+                        <div class="res-sr-mit">${_mit} <span class="res-raw">— ${sr.credited ? 'DC ' + Math.round(sr.dc * 100) + '%' : 'No diagnostic coverage credited'}</span></div>
                     </div>`;
             });
         }

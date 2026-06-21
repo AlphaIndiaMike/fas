@@ -315,12 +315,27 @@ const fmt = (() => {
         return '≈ 1 in ' + intDot(N) + ' ' + (plural || 'units');
     }
 
+    /* The parenthesised integrity-band suffix shown after a safety-requirement /
+       mitigation line: " (ASIL C)" or " (SIL 3)". It is the integrity DECLARED on
+       the element the mitigation lives in, inherited verbatim. Returns '' unless
+       BOTH a non-empty mitigation text is present AND the band is a real ASIL/SIL
+       grade (ASIL A–D or SIL 1–4) — so an empty mitigation, an undeclared element
+       (no band), or a non-grade result (QM, "No SIL", "—") adds nothing. The
+       grade strings contain no HTML-special characters, so the result is safe to
+       drop into markup as-is. */
+    function mitigationBandSuffix(text, band) {
+        if (!text || !String(text).trim()) return '';
+        const b = (band == null) ? '' : String(band).trim();
+        if (!/^(ASIL [A-D]|SIL [1-4])$/.test(b)) return '';
+        return ' (' + b + ')';
+    }
+
     return {
         escHtml, uid, bumpUid, resetUid,
         clamp, posInt, posNum,
         probStr, fitStr, perHourStr,
         pctStr, pctInputVal, intDot, inHoursStr,
-        sciStr, oneInN,
+        sciStr, oneInN, mitigationBandSuffix,
         pfhDualStr, silForPfh, asilForPfh, asilFromMetrics, iso26262TargetFor,
         route1hMaxSil, sffBandLabel, silRank, silMin, achievedBand
     };

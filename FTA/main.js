@@ -825,7 +825,7 @@ const main = (() => {
         const url  = URL.createObjectURL(blob);
         const a    = document.createElement('a');
         a.href     = url;
-        a.download = (project.name || 'fas-project').replace(/\s+/g, '_') + '.json';
+        a.download = (project.name || 'fas-project').replace(/\s+/g, '_') + '.fas';
         a.click();
         URL.revokeObjectURL(url);
         _unsaved = false;   // work has been saved to a file
