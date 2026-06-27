@@ -197,13 +197,13 @@ const dialogs = (() => {
         // unchanged; selecting a different function re-renders the editable /
         // derived body below.
         const ownerField = isFmeda
-            ? _field(multiCreate ? 'Function(s)' : 'Function',
+            ? _field(existing ? 'Function(s)' : 'Function',
                 picklist.create({ id: 'fGroup', items: _functionPickItems(p),
-                            selected: e.groupId, multi: multiCreate,
+                            selected: e.groupId ? [e.groupId] : [], multi: true,
                             placeholder: 'Search functions…' }),
-                multiCreate
-                    ? 'Pick one or more functions — an independent copy of this failure mode is created in each. A low-level function holds editable leaf modes; a top/mid function holds derived effects.'
-                    : 'The function this failure mode belongs to. A low-level element holds editable leaf failure modes; a top/mid element holds derived effects computed from their causes. Re-pick to move the failure mode.')
+                existing
+                    ? 'The function this failure mode belongs to. It stays in the first function selected; selecting additional functions places an independent copy in each. A low-level function holds editable leaf modes; a top/mid function holds derived effects.'
+                    : 'The function this failure mode belongs to. Selecting more than one places an independent copy in each. A low-level function holds editable leaf modes; a top/mid function holds derived effects.')
             : _field('Group',
                 `<select class="dlg-inp" id="fGroup">${_groupOptions(p, e.groupId)}</select>`,
                 'Groups mark independence boundaries. Two basic events sharing a group flag FFI on AND/Voting gates that combine them. ' + _help('ffi'));
@@ -247,16 +247,40 @@ const dialogs = (() => {
 
         if (isFmeda) {
             if (multiCreate) {
-                // Multi-select: the body stays the editable leaf form for all
-                // chosen functions, so DON'T rebuild it on each toggle (that
-                // would discard values the user has typed). Just track picks.
-                picklist.wire('fGroup');
+                // Multi-select. The body is the leaf spec to replicate. Show the
+                // editable FIT/DC/mitigation inputs only when at least one chosen
+                // function is a LEAF (low-level or mitigation). When every chosen
+                // function is derived (mid/top), hide the inputs — a derived
+                // effect takes its rate and DC from the lower-level modes through
+                // the failure net, so there is nothing to enter. Rebuild the body
+                // only when that state flips, so values typed while a leaf stays
+                // selected are never discarded.
+                let _editable = true;            // default: editable (the leaf case)
+                picklist.wire('fGroup', () => {
+                    const ids = picklist.values('fGroup');
+                    const anyLeaf = ids.length === 0
+                        ? true                   // nothing chosen yet → keep the leaf form
+                        : ids.some(id => !_fmedaDerivedLevel(p, id));
+                    if (anyLeaf === _editable) return;   // no change → preserve typed values
+                    _editable = anyLeaf;
+                    const flex = document.getElementById('fmedaFlex');
+                    if (!flex) return;
+                    const flexE = anyLeaf
+                        ? Object.assign({}, e, { groupId: null })   // editable leaf form
+                        : Object.assign({}, e, { groupId: ids[0] }); // derived read-only note
+                    flex.innerHTML = _fmedaFlexHtml(p, flexE, existing);
+                    if (anyLeaf) _wireProbSection(p, e);
+                });
                 _wireProbSection(p, e);
             } else {
-                // Single edit/create: re-pick the function → move the failure
-                // mode and rebuild the editable/derived body for the new level.
-                picklist.wire('fGroup', (val) => {
-                    e.groupId = val || null;
+                // Edit: the picker is multi too. The failure mode stays in the
+                // FIRST selected function (its home); any additional selections
+                // spawn independent copies on save. Rebuild the editable/derived
+                // body when the HOME function's level changes (a move).
+                picklist.wire('fGroup', () => {
+                    const home = picklist.values('fGroup')[0] || e.groupId;
+                    if (home === e.groupId) return;
+                    e.groupId = home;
                     const flex = document.getElementById('fmedaFlex');
                     if (flex) flex.innerHTML = _fmedaFlexHtml(p, e, existing);
                     if (!_fmedaDerivedLevel(p, e.groupId)) _wireProbSection(p, e);
@@ -502,17 +526,14 @@ const dialogs = (() => {
         // review; the live project is never mutated on open, only on Save.
         if (project.mode === 'FMEDA') {
             const eP       = _fmedaAsPrimitives(project, e);
-            const migrated = !!e.id && e.lambdaBase == null;
-            const note = migrated
-                ? `<div class="dlg-note">Loaded from stored rates and shown as
-                    λ × FMD × dangerous-fraction. Review the split; Save to store
-                    it in this form.</div>`
-                : '';
+            const note = `<div class="dlg-note">The failure rate is set on the
+                <strong>element</strong> (its datasheet λ); this failure mode
+                inherits it and takes its <strong>FMD</strong> share.</div>`;
             return `
                 <input type="hidden" id="fInputChoice" value="coverage">
-                <div class="dlg-label">Failure rate &amp; classification ${_help('fmedaInput')}</div>
+                <div class="dlg-label">Failure mode — share &amp; diagnostic ${_help('fmedaInput')}</div>
                 ${note}
-                <div id="fModeBody">${_fmedaInputBodyHtml(eP)}</div>`;
+                <div id="fModeBody">${_fmedaInputBodyHtml(eP, project)}</div>`;
         }
         // A single dropdown chooses HOW the failure is specified. This
         // replaces the old "input mode" radios + a separate UNIT chip group,
@@ -586,46 +607,50 @@ const dialogs = (() => {
        explanation lives behind its (?) help. The live readout (#fLive) shows
        every derived quantity, and a one-line summary states the assumptions in
        force while the drawer is closed. */
-    function _fmedaInputBodyHtml(e) {
+    function _fmedaInputBodyHtml(e, project) {
         const pct = (id, frac) =>
             `<div class="dlg-affix-wrap">` +
             `<input class="dlg-inp" id="${id}" type="number" min="0" max="100" step="0.001" ` +
             `data-pct="1" value="${fmt.pctInputVal(frac)}"><span class="dlg-affix">%</span></div>`;
-        const lam  = e.lambdaBase != null ? e.lambdaBase : (e.failureRateRaw || 0);
         const fmd  = e.fmd != null ? e.fmd : 1;
         const dang = e.dangerousFraction != null ? e.dangerousFraction : 1;
         const dc1  = fmt.clamp(e.diagnosticCoverage, 0, 1, 0);
         const dc2  = fmt.clamp(e.diagnosticCoverageLatent, 0, 1, 0);
-        // Rate unit: stored in FIT, optionally entered/shown as /h (PFH).
-        const unit = (e.lambdaUnit === 'ph') ? 'ph' : 'fit';
-        const lamShown = (unit === 'ph') ? (lam * 1e-9) : lam;
-        // λ + DC₁ are the only inputs a user must touch; everything else
-        // (dangerous fraction, FMD, latent coverage DC₂, mission time) is folded
-        // into an optional drawer with conservative defaults. The live readout
-        // (#fLive) states the DC₁ → SPFM and DC₂ → LFM conversion explicitly.
+        // The rate is INHERITED from the element (its datasheet λ); this mode
+        // takes its FMD share. So the FM editor edits FMD + the dangerous split
+        // + diagnostic coverage — never a per-mode rate.
+        const el    = project ? project.elementOf(e.groupId) : null;
+        const isMit = project && el ? project.isMitigationElement(el) : false;
+        const elLam = project && el ? project.elementLambdaFit(el) : 0;
+        const elName = el ? el.name : 'its element';
+        const lamNote = !el ? ''
+            : (elLam > 0
+                ? `Inherits λ = <strong>${fmt.fitStr(elLam)}</strong> from <em>${fmt.escHtml(elName)}</em>; this mode takes its FMD share below.`
+                : `<em>${fmt.escHtml(elName)}</em> has no base failure rate λ yet — set it on the element, or this mode computes 0 FIT.`);
+        const dcLabel = isMit
+            ? 'Coverage of incoming, DC ' + _help('mitigationLayer')
+            : 'Diagnostic coverage, DC\u2081 ' + _help('coverage');
+        const selfChk = isMit
+            ? `<label class="dlg-check"><input type="checkbox" id="fCovSelf"${e.coverageIncludesSelf ? ' checked' : ''}> Coverage includes self-diagnostic ${_help('selfDiagnostic')}</label>`
+            : '';
         return `
+            <div class="dlg-note dlg-note--flush">${lamNote}</div>
             <div class="dlg-row">
-                ${_field('Base failure rate, λ ' + _help('lambdaBase'),
-                    `<div class="dlg-affix-wrap"><input class="dlg-inp" id="fLambdaBase" type="number" min="0" step="any" value="${lamShown}">` +
-                    `<select class="dlg-affix-sel" id="fLambdaUnit" title="Rate unit">` +
-                    `<option value="fit" ${unit === 'fit' ? 'selected' : ''}>FIT</option>` +
-                    `<option value="ph" ${unit === 'ph' ? 'selected' : ''}>/h (PFH)</option>` +
-                    `</select></div>`)}
-                ${_field('Diagnostic coverage, DC₁ ' + _help('coverage'),
-                    pct('fDC', dc1))}
+                ${_field('Share of element\u2019s λ — FMD ' + _help('fmd'),
+                    pct('fFmd', fmd))}
+                ${_field(dcLabel, pct('fDC', dc1))}
             </div>
+            ${selfChk}
             <details class="dlg-drawer" id="fAdvDrawer">
-                <summary class="dlg-drawer-sum">Refine the assumptions (optional)</summary>
+                <summary class="dlg-drawer-sum">Refine the assumptions</summary>
                 <div class="dlg-drawer-body">
                     <div class="dlg-row">
                         ${_field('Dangerous fraction ' + _help('dangerousFraction'),
                             pct('fDangerous', dang))}
-                        ${_field('Failure-mode distribution, FMD ' + _help('fmd'),
-                            pct('fFmd', fmd))}
-                    </div>
-                    <div class="dlg-row">
                         ${_field('Latent-fault coverage, DC₂ ' + _help('latentCoverage'),
                             pct('fDCL', dc2))}
+                    </div>
+                    <div class="dlg-row">
                         ${_field('Mission time override (h) ' + _help('missionTime'),
                             `<input class="dlg-inp" id="fMtO" type="number" min="0" step="any" value="${e.missionTimeOverride != null ? e.missionTimeOverride : ''}">`)}
                     </div>
@@ -809,32 +834,42 @@ const dialogs = (() => {
         // FMEDA: show the full derived chain from the primitives so the
         // computation is visible and traceable (qualification aid).
         if (project.mode === 'FMEDA' && e.probMode === 'coverage') {
-            const base = Math.max(0, +e.lambdaBase || +e.failureRateRaw || 0);
+            // The rate is inherited from the element (its datasheet λ); this
+            // mode takes its FMD share.
+            const el   = project.elementOf(e.groupId);
+            const base = project.elementLambdaFit(el);
+            const isMit = el ? project.isMitigationElement(el) : false;
             const fmd  = fmt.clamp(e.fmd, 0, 1, 1);
             const dang = fmt.clamp(e.dangerousFraction, 0, 1, 1);
             const dc1  = fmt.clamp(e.diagnosticCoverage, 0, 1, 0);
             const dc2  = fmt.clamp(e.diagnosticCoverageLatent, 0, 1, 0);
-            // State the assumptions still at their conservative default, so the
-            // user knows what the model is filling in for them (drawer closed).
             const assume = document.getElementById('fAssume');
             if (assume) {
                 const a = [];
                 if (dang === 1)  a.push('all failures dangerous (100%)');
-                if (dc1  === 0)  a.push('no diagnostic coverage');
+                if (!isMit && dc1 === 0) a.push('no diagnostic coverage');
                 if (dc2  === 0)  a.push('no latent-fault check');
-                if (fmd  === 1)  a.push('single mode (FMD 100%)');
+                if (fmd  === 1)  a.push('this mode is the element\u2019s whole λ (FMD 100%)');
                 assume.innerHTML = a.length
                     ? 'Assuming: ' + a.join(', ') + '. Refine in the drawer.'
                     : '';
             }
             const lamMode = base * fmd;
             const lamD = lamMode * dang, lamS = lamMode * (1 - dang);
+            // A MITIGATION mode: its coverage reduces the INCOMING rate (shown
+            // per effect in the right pane), not its own — so the per-mode trace
+            // shows its own contribution and how the coverage acts.
+            if (isMit) {
+                live.innerHTML =
+                    'own λ<sub>D</sub> = <strong>' + fmt.fitStr(lamD) + '</strong>' +
+                    (base > 0 ? '' : ' (set the element\u2019s λ)') +
+                    '<br>this mitigation reduces the <em>incoming</em> rate by DC = <strong>' + Math.round(dc1 * 100) + '%</strong>' +
+                    '<br>its own rate is added' + (e.coverageIncludesSelf ? ' and also reduced (self-diagnostic)' : ' in full (not self-diagnostic)') +
+                    '. The residual is shown per effect in the results panel.';
+                return;
+            }
             const lamDD = lamD * dc1,   lamDU = lamD * (1 - dc1);
             const pfh = lamDU * 1e-9;
-            // The two diagnostic coverages map directly onto the two ISO 26262
-            // hardware-architecture metrics — make that conversion explicit and
-            // live, because it is the single most confusing point of the model:
-            //   DC₁ (single-point) → SPFM ,  DC₂ (latent) → LFM.
             const lamTot   = lamMode;                 // λD + λS for this mode
             const hasSM    = dc1 > 0;
             const lamSPF   = hasSM ? 0 : lamD;
@@ -844,10 +879,6 @@ const dialogs = (() => {
             const lamMPFl  = lamD * dc1 * (1 - dc2);
             const lfm      = mpfBase > 0 ? 1 - lamMPFl / mpfBase : null;
             const pc = x => (x == null ? '—' : Math.round(x * 100) + '%');
-            // Single active-lens band — the residual rate this leaf contributes,
-            // mapped to the active scale (no SIL/ASIL pair). This is a live
-            // computation trace; the integrity VERDICT is rolled up to the
-            // function and element, not claimed for the individual mode.
             const isoLens = (project.standard !== 'IEC61508');
             const band = isoLens ? fmt.asilFromMetrics(pfh, spfm, lfm) : fmt.silForPfh(pfh);
             const star = (band === 'ASIL A') ? '*' : '';
@@ -937,7 +968,10 @@ const dialogs = (() => {
             draft.lambdaBase = (unit === 'ph') ? (+lamB.value || 0) * 1e9 : +lamB.value;
         }
         if (fmdEl)   draft.fmd                = asFrac(fmdEl);
-        if (dangEl)  draft.dangerousFraction  = asFrac(dangEl);
+        // A blank dangerous fraction is NOT read as 0 (that would mean "all safe"
+        // — a flattering assumption). It defaults to 100 % (all dangerous, the
+        // conservative worst case), which is also the value a new mode shows.
+        if (dangEl)  draft.dangerousFraction  = (String(dangEl.value).trim() === '') ? 1 : asFrac(dangEl);
         // DC fields are percents in the FMEDA editor (data-pct), plain 0–1 in
         // the FTA/ETA coverage chooser. asFrac honours both.
         if (dc)      draft.diagnosticCoverage = asFrac(dc);
@@ -947,6 +981,8 @@ const dialogs = (() => {
         if (evid)    draft.diagnosticEvidence = evid.value;
         const mit = document.getElementById('fMitigation');
         if (mit) draft.mitigation = mit.value;
+        const covSelf = document.getElementById('fCovSelf');
+        if (covSelf) draft.coverageIncludesSelf = covSelf.checked;
 
         const tSel = document.getElementById('fTarget');
         if (tSel) draft.target = tSel.value || null;
@@ -974,6 +1010,33 @@ const dialogs = (() => {
     function _saveEvent(existing, originalDraft) {
         const draft = _readDraft(originalDraft);
         if (!draft.name || !draft.name.trim()) { _err('Name is required.'); return; }
+        // ── No silent FLATTERING zero. A blank rate-bearing field whose absence
+        // would UNDERSTATE the danger (a base rate, a dangerous λ_D, a probability,
+        // or an FMD share) is rejected, never read as 0 — but 0 is a perfectly
+        // valid value to TYPE (e.g. a failure mode that takes no share, or a
+        // completely-safe mode), so only an empty field is flagged. Fields with a
+        // safe conservative default are NOT here: a blank dangerous fraction
+        // defaults to 100 % (all dangerous — the worst case, set in _readDraft),
+        // and a blank diagnostic coverage means "no credit" (0). Only the fields
+        // actually present in the current input mode are checked; one inside a
+        // collapsed drawer is revealed so the user is not left hunting.
+        {
+            const _isBlank = id => { const el = document.getElementById(id); return !!el && String(el.value).trim() === ''; };
+            const _reveal = id => {
+                const el = document.getElementById(id);
+                const dr = el && el.closest && el.closest('details.dlg-drawer');
+                if (dr) dr.open = true;
+            };
+            const _required = [
+                ['fProb',    'Enter a probability of failure — a blank field is not assumed to be zero.'],
+                ['fRate',    'Enter a failure rate λ (FIT) — a blank field is not assumed to be zero.'],
+                ['fRateRaw', 'Enter a dangerous failure rate λ_D (FIT) — a blank field is not assumed to be zero.'],
+                ['fFmd',     'Enter the failure-mode distribution (FMD) — a blank field is not assumed to be zero. Type 0 if this mode takes no share of the element\u2019s λ.'],
+            ];
+            for (const [id, msg] of _required) {
+                if (_isBlank(id)) { _reveal(id); _err(msg); return; }
+            }
+        }
         if (draft.kind === 'basic') {
             if (draft.probMode === 'direct') {
                 if (draft.directUnit === 'PFD' &&
@@ -1044,14 +1107,30 @@ const dialogs = (() => {
             target:              draft.kind === 'top' ? (draft.target || null) : null
         };
         const p = api.getProject();
-        const multiCreate = !existing && p.mode === 'FMEDA';
-        if (multiCreate) {
+        if (p.mode === 'FMEDA') {
+            // Layered model: a failure mode carries NO own rate — it inherits the
+            // element's λ and takes its FMD share. Store FMD / dangerous fraction
+            // / coverages (and the mitigation self-diagnostic flag); clear the
+            // per-mode λ and its vestigial λ_D/λ_S mirror.
+            patch.lambdaBase = null;
+            patch.fmd = fmt.clamp(draft.fmd, 0, 1, 1);
+            patch.dangerousFraction = fmt.clamp(draft.dangerousFraction, 0, 1, 1);
+            patch.failureRateRaw = 0;
+            patch.failureRateSafe = 0;
+            patch.coverageIncludesSelf = !!draft.coverageIncludesSelf;
+        }
+        if (p.mode === 'FMEDA') {
+            // FMEDA failure mode: the function picker is multi for both create
+            // and edit. CREATE makes an independent copy in each chosen function.
+            // EDIT keeps the mode in the first chosen function and spawns a copy
+            // into each additional one.
             const fnIds = picklist.values('fGroup');
-            if (!fnIds.length) { _err('Pick at least one function.'); return; }
-            // groupId is assigned per chosen function, not from the CSV value.
+            if (!fnIds.length) { _err('Choose the function this failure mode belongs to (pick one or more above).'); return; }
             const { groupId, ...spec } = patch;
-            if (fnIds.length === 1) {
-                api.applyEventCreate({ ...spec, groupId: fnIds[0] });
+            if (existing) {
+                api.applyEventSpawn(existing.id, spec, fnIds);
+            } else if (fnIds.length === 1) {
+                api.applyEventCreate(Object.assign({}, spec, { groupId: fnIds[0] }));
             } else {
                 api.applyEventCreateMulti(spec, fnIds);
             }
@@ -1469,11 +1548,13 @@ const dialogs = (() => {
             // carry the flag; show what makes it special instead of the chips.
             fmedaFields += `<input type="hidden" id="fIsMitigation" value="1">`;
             fmedaFields += `<div class="dlg-note">
-                <strong>Mitigation element (M).</strong> A low-level element that
-                carries its own functions and failure modes. To address a common
-                cause, draw a failure-net link from one of its failure modes to
-                the common cause (M → cause). It adds its own failure rate to the
-                chain like any cause — it never subtracts.</div>`;
+                <strong>Mitigation element (M).</strong> A hardware element that acts
+                as a <em>diagnostic layer</em>: draw a failure-net link from each
+                cause it addresses INTO one of its failure modes (cause → M), then
+                set that mode's coverage. It REDUCES the incoming rate by its
+                coverage; its own failure rate is added (a diagnostic can itself
+                fail) and is not self-covered unless you mark the mode
+                self-diagnosing.</div>`;
         } else if (isFmeda && g.kind === 'element') {
             const levels = [['top','Top level'],['mid','Mid level'],['low','Low level']];
             const opts = levels.map(([v,l]) =>
@@ -1483,11 +1564,23 @@ const dialogs = (() => {
             fmedaFields += `<div class="dlg-label">Swimlane level</div>
                 <div class="dlg-chips" id="fLevelChips">${opts}</div>`;
         } else if (isFmeda && g.kind === 'function') {
-            fmedaFields += _field('Parent element',
+            // Function realisation type (v7) — HW / SW / SYS. Software is a
+            // function (never a standalone element); the type is a classification
+            // and does not scale the rate.
+            const curFn = ['HW','SW','SYS'].includes(g.fnType) ? g.fnType : 'HW';
+            const fnOpts = CONFIG.fnTypes.map(t =>
+                `<label class="dlg-chip ${curFn === t.value ? 'dlg-chip-on' : ''}">
+                    <input type="radio" name="fFnType" value="${t.value}" ${curFn === t.value ? 'checked' : ''}>
+                    <span>${fmt.escHtml(t.label)}</span></label>`).join('');
+            fmedaFields += `<div class="dlg-label dlg-label--gap-sm">Function type ${_help('fnType')}</div>
+                <div class="dlg-chips" id="fFnTypeChips">${fnOpts}</div>`;
+            fmedaFields += _field(existing ? 'Parent element(s)' : 'Parent element',
                 picklist.create({ id: 'fParent', items: _elementPickItems(p),
-                            selected: g.parentId, multi: false,
+                            selected: g.parentId ? [g.parentId] : [], multi: true,
                             placeholder: 'Search elements…' }),
-                'The architecture element this function belongs to.');
+                existing
+                    ? 'The element this function belongs to. The function stays in the first element selected; selecting additional elements places an independent copy — with its failure modes — in each.'
+                    : 'The element this function belongs to. Selecting more than one places an independent copy of the function in each.');
             // Copy existing failure modes into this function: reuse
             // the text and properties of failure modes defined elsewhere.
             const fmItems = _failureModePickItems(p);
@@ -1505,41 +1598,55 @@ const dialogs = (() => {
         // Help lives behind the (?) buttons (consistent with every other
         // field), not inline.
         if (isFmeda && g.kind === 'element') {
-            const et = (g.elementType === 'A') ? 'A' : 'B';
-            const hv = Math.max(0, Math.min(2, parseInt(g.hft, 10) || 0));
-            const typeOpts = [['A', 'Type A — simple'], ['B', 'Type B — complex / subsystem']].map(([v, l]) =>
-                `<label class="dlg-chip ${et === v ? 'dlg-chip-on' : ''}">
-                    <input type="radio" name="fElType" value="${v}" ${et === v ? 'checked' : ''}>
-                    <span>${l}</span></label>`).join('');
-            const hftOpts = [0, 1, 2].map(v =>
-                `<label class="dlg-chip ${hv === v ? 'dlg-chip-on' : ''}">
-                    <input type="radio" name="fHft" value="${v}" ${hv === v ? 'checked' : ''}>
-                    <span>${v}</span></label>`).join('');
-            fmedaFields += `<div class="dlg-label dlg-label--gap-sm">Element type — IEC 61508 Route 1ₕ ${_help('elementType')}</div>
-                <div class="dlg-chips" id="fElTypeChips">${typeOpts}</div>
-                <div class="dlg-label">Hardware fault tolerance (HFT) ${_help('hft')}</div>
-                <div class="dlg-chips" id="fHftChips">${hftOpts}</div>`;
-            // Subsystem supplier claim — optional, for a black-box subsystem
-            // characterised by the supplier rather than by internal modes.
-            const claimSff = (g.claimedSff != null) ? fmt.pctInputVal(g.claimedSff) : '';
+            const isLowInit = isMitigation || g.level === 'low';
+            // ── Safety capability — the PRIMARY input (help behind the (?)). A
+            // declared SIL/ASIL is the element's systematic-capability ceiling and
+            // pre-fills the worst-case hardware numbers below; for a subsystem /
+            // system it is optional (leave blank to compute from the leaves).
             const capOpts = ['<option value="">— none —</option>'].concat(
                 CONFIG.targetCombined.map(t =>
                     `<option value="${t.value}" ${g.claimedCapability === t.value ? 'selected' : ''}>${fmt.escHtml(t.label)}</option>`)
             ).join('');
-            const claimOpen = (g.claimedSff != null || g.claimedCapability) ? ' open' : '';
-            fmedaFields += `
-                <details class="dlg-drawer" id="fClaimDrawer"${claimOpen}>
-                    <summary class="dlg-drawer-sum">Subsystem — supplier safety claim (optional) ${_help('subsystemClaim')}</summary>
+            fmedaFields += _field('Safety capability (SIL / ASIL) ' + _help('subsystemClaim'),
+                `<select class="dlg-inp" id="fClaimCap">${capOpts}</select>`);
+
+            // ── Hardware details — LOW-LEVEL (hardware) elements only, in a closed
+            // drawer (refinements over the declared capability). Same layout as the
+            // failure-mode editor: two-column numeric inputs, help behind (?).
+            const lamUnit = (g.lambdaUnit === 'ph') ? 'ph' : 'fit';
+            const lamVal  = (g.lambdaBase != null)
+                ? (lamUnit === 'ph' ? g.lambdaBase * 1e-9 : g.lambdaBase) : '';
+            const claimSff = (g.claimedSff != null) ? fmt.pctInputVal(g.claimedSff) : '';
+            const et = (g.elementType === 'A') ? 'A' : 'B';
+            const typeOpts = [['A', 'Type A — simple'], ['B', 'Type B — complex / subsystem']].map(([v, l]) =>
+                `<label class="dlg-chip ${et === v ? 'dlg-chip-on' : ''}">
+                    <input type="radio" name="fElType" value="${v}" ${et === v ? 'checked' : ''}>
+                    <span>${l}</span></label>`).join('');
+            // HFT is COMPUTED from the failure-net redundancy structure (never
+            // entered); show, as a live note, the value the architecture yields.
+            const hftComputed = existing ? p.fmedaComputedHft(g.id) : 0;
+            const hftNote = hftComputed >= 1
+                ? `HFT <strong>${hftComputed}</strong> — computed from ${hftComputed + 1} independent redundant channels that AND-converge in the failure net.`
+                : `HFT <strong>0</strong> — no independent redundancy detected in the failure net (read from the architecture, never entered).`;
+            fmedaFields += `<div id="fHwDrawerWrap" style="${isLowInit ? '' : 'display:none'}">
+                <details class="dlg-drawer" id="fHwDrawer">
+                    <summary class="dlg-drawer-sum">Hardware details</summary>
                     <div class="dlg-drawer-body">
                         <div class="dlg-row">
-                            ${_field('Claimed SFF',
+                            ${_field('Base failure rate, λ ' + _help('elementLambda'),
+                                `<div class="dlg-affix-wrap"><input class="dlg-inp" id="fElemLambda" type="number" min="0" step="any" value="${lamVal}">` +
+                                `<select class="dlg-affix-sel" id="fElemLambdaUnit" title="Rate unit">` +
+                                `<option value="fit" ${lamUnit === 'fit' ? 'selected' : ''}>FIT</option>` +
+                                `<option value="ph" ${lamUnit === 'ph' ? 'selected' : ''}>/h (PFH)</option>` +
+                                `</select></div>`)}
+                            ${_field('Claimed SFF ' + _help('subsystemClaim'),
                                 `<div class="dlg-affix-wrap"><input class="dlg-inp" id="fClaimSff" type="number" min="0" max="100" step="0.001" value="${claimSff}"><span class="dlg-affix">%</span></div>`)}
-                            ${_field('Claimed capability',
-                                `<select class="dlg-inp" id="fClaimCap">${capOpts}</select>`)}
                         </div>
-                        <div class="dlg-note dlg-note--flush">Both are treated as assumptions to validate against the supplier's safety manual / certificate, and are flagged as a claim in the results.</div>
+                        <div class="dlg-label dlg-label--gap-sm">Element type — IEC 61508 Route 1ₕ ${_help('elementType')}</div>
+                        <div class="dlg-chips" id="fElTypeChips">${typeOpts}</div>
+                        <div class="dlg-note dlg-note--flush" id="fHftNote">${hftNote}</div>
                     </div>
-                </details>`;
+                </details></div>`;
         }
 
         modal.open((existing ? 'Edit ' : 'New ') +
@@ -1574,6 +1681,15 @@ const dialogs = (() => {
                     'Remove "' + existing.name + '". Events in this group fall back to ungrouped.',
                     () => { api.applyGroupDelete(existing.id); modal.close(); })
             }] : []),
+            ...((existing && g.kind === 'element' && g.level === 'low') ? [{
+                // Flip a low-level element between an ordinary element and a
+                // Mitigation, e.g. when one was added with the wrong palette
+                // item. Applies the flag and closes; functions, failure modes
+                // and net edges are kept.
+                label: g.mitigation ? 'Convert to element' : 'Convert to mitigation',
+                cls: 'btn-sec',
+                onClick: () => { api.applyConvertMitigation(existing.id, !g.mitigation); modal.close(); }
+            }] : []),
             { label: 'Cancel', cls: 'btn-sec', onClick: modal.close },
             {
                 label: existing ? 'Save' : 'Create',
@@ -1599,8 +1715,8 @@ const dialogs = (() => {
                     c.classList.toggle('dlg-chip-on', c.querySelector('input').checked));
             });
         });
-        // Route 1ₕ Type / HFT chips: same on-state toggle behaviour.
-        ['fElTypeChips', 'fHftChips'].forEach(id => {
+        // Route 1ₕ Type chips + archType / fnType chips: on-state toggle.
+        ['fElTypeChips', 'fFnTypeChips'].forEach(id => {
             document.querySelectorAll('#' + id + ' input').forEach(r => {
                 r.addEventListener('change', () => {
                     document.querySelectorAll('#' + id + ' .dlg-chip').forEach(c =>
@@ -1608,6 +1724,41 @@ const dialogs = (() => {
                 });
             });
         });
+        // The hardware-details drawer applies to a LOW-LEVEL (hardware) element
+        // only. Show/hide it live as the swimlane level changes.
+        const _toggleHwDrawer = () => {
+            const wrap = document.getElementById('fHwDrawerWrap');
+            if (!wrap) return;
+            const sel = document.querySelector('input[name="fLevel"]:checked');
+            const lvl = sel ? sel.value : (g.level || '');
+            wrap.style.display = (lvl === 'low') ? '' : 'none';
+        };
+        document.querySelectorAll('#fLevelChips input').forEach(r =>
+            r.addEventListener('change', _toggleHwDrawer));
+        _toggleHwDrawer();
+        // Selecting a safety capability pre-fills the worst-case hardware numbers
+        // the standard permits for that band — but only into EMPTY fields, so an
+        // entered datasheet value is never overwritten — and opens the drawer so
+        // they are visible for review/override.
+        const _capSel = document.getElementById('fClaimCap');
+        if (_capSel) {
+            const SFF_FOR_BAND = { 'ASIL A': 0.60, 'ASIL B': 0.90, 'ASIL C': 0.97, 'ASIL D': 0.99,
+                                   'SIL 1': 0.60, 'SIL 2': 0.90, 'SIL 3': 0.99, 'SIL 4': 0.99 };
+            _capSel.addEventListener('change', () => {
+                const band = _capSel.value;
+                if (!band) return;
+                const lamEl = document.getElementById('fElemLambda');
+                const unit  = document.getElementById('fElemLambdaUnit');
+                const sffEl = document.getElementById('fClaimSff');
+                const wcFit = fmt.worstCaseFitForCapability(band);
+                if (lamEl && lamEl.value.trim() === '' && wcFit != null)
+                    lamEl.value = (unit && unit.value === 'ph') ? (wcFit * 1e-9) : wcFit;
+                if (sffEl && sffEl.value.trim() === '' && SFF_FOR_BAND[band] != null)
+                    sffEl.value = fmt.pctInputVal(SFF_FOR_BAND[band]);
+                const drawer = document.getElementById('fHwDrawer');
+                if (drawer) drawer.open = true;
+            });
+        }
         picklist.wire('fParent');
         picklist.wire('fCopyFms');
 
@@ -1644,27 +1795,93 @@ const dialogs = (() => {
         if (mitH && mitH.value === '1') { patch.mitigation = true; patch.level = 'low'; }
         const levelR = document.querySelector('input[name="fLevel"]:checked');
         if (levelR) patch.level = levelR.value;
-        // Route 1ₕ inputs (elements only).
-        const typeR = document.querySelector('input[name="fElType"]:checked');
-        if (typeR) patch.elementType = (typeR.value === 'A') ? 'A' : 'B';
-        const hftR = document.querySelector('input[name="fHft"]:checked');
-        if (hftR) patch.hft = Math.max(0, Math.min(2, parseInt(hftR.value, 10) || 0));
-        // Subsystem supplier claim (elements only). Blank claimed SFF ⇒ null
-        // (compute from modes); a value is stored as a 0–1 fraction.
-        const claimSffEl = document.getElementById('fClaimSff');
-        if (claimSffEl) {
-            const raw = claimSffEl.value.trim();
-            patch.claimedSff = (raw === '') ? null : fmt.clamp(+raw / 100, 0, 1, null);
+        // Element fields are LEVEL-aware: a low-level element is hardware and
+        // carries the hardware details; a mid/top element is systematic and
+        // carries none (it is computed from its leaves). archType is derived
+        // from the level so the two never drift.
+        const _isElement = (patch.kind || (existing && existing.kind)) === 'element';
+        const _effLevel  = patch.level || (existing && existing.level);
+        const _isLowEl   = _isElement &&
+            (patch.mitigation || _effLevel === 'low' || (existing && existing.mitigation));
+        if (_isElement) {
+            patch.archType = (patch.mitigation || _effLevel === 'low')
+                ? 'hardware'
+                : ((CONFIG.archTypeByLevel[_effLevel] || {}).default || 'subsystem');
         }
+        if (_isLowEl) {
+            const typeR = document.querySelector('input[name="fElType"]:checked');
+            if (typeR) patch.elementType = (typeR.value === 'A') ? 'A' : 'B';
+            // HFT is computed from the failure-net structure — never stored.
+            patch.hft = null;
+            const lamElEl = document.getElementById('fElemLambda');
+            if (lamElEl) {
+                const unitSel = document.getElementById('fElemLambdaUnit');
+                const unit = unitSel ? unitSel.value : 'fit';
+                const raw = lamElEl.value.trim();
+                if (raw === '') { patch.lambdaBase = null; }
+                else {
+                    patch.lambdaUnit = (unit === 'ph') ? 'ph' : 'fit';
+                    patch.lambdaBase = Math.max(0, (unit === 'ph') ? (+raw || 0) * 1e9 : (+raw || 0));
+                }
+            }
+            const claimSffEl = document.getElementById('fClaimSff');
+            if (claimSffEl) {
+                const raw = claimSffEl.value.trim();
+                patch.claimedSff = (raw === '') ? null : fmt.clamp(+raw / 100, 0, 1, null);
+            }
+        } else if (_isElement) {
+            // Systematic (mid/top) element — no hardware rate or SFF of its own.
+            patch.lambdaBase = null;
+            patch.claimedSff = null;
+            patch.hft = null;
+        }
+        // Function realization type (functions only).
+        const fnTypeR = document.querySelector('input[name="fFnType"]:checked');
+        if (fnTypeR) patch.fnType = fnTypeR.value;
+        // Safety capability — the PRIMARY element field (optional for mid/top).
         const claimCapEl = document.getElementById('fClaimCap');
         if (claimCapEl) patch.claimedCapability = claimCapEl.value || null;
-        const parentSel = document.getElementById('fParent');
-        if (parentSel && parentSel.value) patch.parentId = parentSel.value;
 
         // Failure modes selected to copy into this function.
         const copyIds = picklist.values('fCopyFms');
 
+        // A FUNCTION carries the multi parent-element picker → spawn across the
+        // chosen elements: on create, one independent copy per element; on edit,
+        // the function stays in the first element and an independent copy (with
+        // its failure modes) is spawned into each additional one. Elements have
+        // no fParent picker and fall through to the ordinary single-group path.
+        const hasParentPicker = !!document.querySelector('.picklist[data-pl="fParent"]');
+        if (hasParentPicker) {
+            const elementIds = picklist.values('fParent');
+            if (!elementIds.length) { _err('Pick at least one parent element.'); return; }
+            delete patch.parentId;
+            api.applyFunctionSpawn(existing ? existing.id : null, patch, elementIds, copyIds);
+            modal.close();
+            return;
+        }
+
         let targetId;
+        // A hardware (low-level / mitigation) element must be CHARACTERISED before
+        // it is saved — its integrity cannot be established from nothing, and a
+        // blank rate is never assumed to be 0. It is characterised by EITHER a
+        // declared safety capability (any band, including QM — the worst case for
+        // that band is taken) OR an entered base failure rate λ. A claimed SFF
+        // alone is only a refinement (it carries no rate), so it does not count.
+        // Mid / top elements are systematic (computed from their leaves) and need
+        // no input — they are not gated here.
+        if (_isLowEl) {
+            const _hasRate = patch.lambdaBase != null && +patch.lambdaBase > 0;
+            const _hasCap  = !!patch.claimedCapability;
+            if (!_hasRate && !_hasCap) {
+                // Reveal the hardware drawer so the λ field is in view — the
+                // capability dropdown above is always visible — and explain both
+                // ways out, concisely.
+                const dr = document.getElementById('fHwDrawer');
+                if (dr) dr.open = true;
+                _err('This element is not characterised yet. Select a safety capability (SIL / ASIL — choose QM if it carries no safety requirement), or enter a base failure rate λ in Hardware details.');
+                return;
+            }
+        }
         if (existing) {
             api.applyGroupUpdate(existing.id, patch, members);
             targetId = existing.id;
@@ -2005,13 +2222,20 @@ const dialogs = (() => {
             lines.push('   - Single-Point Fault Metric (SPFM): ' + pct(t.spfm));
             lines.push('   - Latent-Fault Metric (LFM): ' + pct(t.lfm));
             lines.push('   - Basis: leaf failure modes. λ_S is the entered safe-failure rate (default 0); λ_SD = 0 (no safe-detected split), so λ_SU = λ_S. SFF = (Σλ_S + Σλ_DD)/Σλ_Total — a conservative floor when λ_S = 0.');
-            if (m.elements.length > 1) {
+            if (m.elements.length) {
                 lines.push('');
                 lines.push('   Per element:');
-                m.elements.slice().sort((a, b) => (b.lambdaTotal || 0) - (a.lambdaTotal || 0)).forEach(e =>
+                m.elements.slice().sort((a, b) => (b.lambdaTotal || 0) - (a.lambdaTotal || 0)).forEach(e => {
+                    const pmhf = (e.lambdaSPF + e.lambdaRF) * 1e-9;
+                    const mh   = fmt.mtbfHoursFromFit(e.lambdaTotal);
+                    const band = iso ? e.achievedAsil : e.achievedSil;
                     lines.push('   - [' + (e.id || '—') + '] ' + e.name +
-                        ': λ ' + fitU(e.lambdaTotal) + ' · SFF ' + pct(e.sff) +
-                        ' · SPFM ' + pct(e.spfm) + ' · LFM ' + pct(e.lfm)));
+                        ': λ ' + fitU(e.lambdaTotal) +
+                        ' · PMHF ' + fmt.perHourStr(pmhf) +
+                        ' · MTBF ' + (mh == null ? '—' : mh.toExponential(2) + ' h') +
+                        ' · SFF ' + pct(e.sff) + ' · SPFM ' + pct(e.spfm) + ' · LFM ' + pct(e.lfm) +
+                        (band && band !== '—' ? ' -> ' + band : ''));
+                });
             }
         }
         lines.push('');
@@ -2111,7 +2335,8 @@ const dialogs = (() => {
     function openExport(project, analysis) {
         const lines = [];
         lines.push('# ' + (project.name || 'Untitled project'));
-        lines.push('Generated by Functional Analysis Studio (FAS) v' +
+        lines.push('Generated ' + fmt.isoDate() +
+                   ' by Functional Analysis Studio (FAS) v' +
                    (CONFIG.appVersion || '?'));
 
         const isEta   = analysis && analysis.mode === 'ETA';
@@ -2153,7 +2378,8 @@ const dialogs = (() => {
             }
         }
         const text = lines.join('\n');
-        const baseName = (project.name || 'fas-report').replace(/\s+/g, '_');
+        const baseName = (project.name || 'fas-report').replace(/\s+/g, '_') +
+                         '_' + fmt.isoDate();
 
         modal.open('Export report', `
             <div class="dlg-msg">

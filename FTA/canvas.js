@@ -333,6 +333,15 @@ const canvas = (() => {
         _refreshGrabbable();
     }
 
+    /* Clear any node/edge selection (the cytoscape highlight left after a
+       tap). Used by the connect flow so a finished — or cancelled —
+       connection leaves nothing visually "held". Safe to call any time. */
+    function deselectAll() {
+        if (!cy || !cy.elements) return;
+        const els = cy.elements();
+        if (els && typeof els.unselect === 'function') els.unselect();
+    }
+
     /* FMEDA: switch which net's edges are drawn (right-pane toggle).
        Now that node positions are persisted (saved x/y on failure modes,
        seeded otherwise), a full re-render no longer moves anything — so we
@@ -739,6 +748,7 @@ const canvas = (() => {
         viewportCenter, nodePosition, revealNode,
         setViewMode,
         setActiveNet, getActiveNet,
+        deselectAll,
         exportPNG
     };
 })();

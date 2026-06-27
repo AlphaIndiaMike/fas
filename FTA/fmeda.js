@@ -19,7 +19,8 @@
     addGroup({ name, color, description, parentId = null,
                kind = 'group', level = null, mitigation = false,
                elementType = null, hft = null, claimedSff = null,
-               claimedCapability = null, x = 0, y = 0 }) {
+               claimedCapability = null, archType = null, lambdaBase = null,
+               lambdaUnit = 'fit', fnType = null, x = 0, y = 0 }) {
         // A Mitigation element is a low-level architecture element with the
         // 'M' id prefix. Normalise: mitigation ⇒ element, low level.
         mitigation = !!mitigation && kind === 'element';
@@ -60,6 +61,19 @@
             // Both are ASSUMPTIONS, flagged as such in the results/report.
             claimedSff:        kind === 'element' ? (claimedSff != null ? fmt.clamp(claimedSff, 0, 1, null) : null) : null,
             claimedCapability: kind === 'element' ? (claimedCapability || null) : null,
+            // Layered model (v7). An element's structural type decides where its
+            // rate comes from: 'hardware' (low, carries λ), 'subsystem' (mid) or
+            // 'system' (top) — the latter two systematic (fed from below). A new
+            // element defaults to the type for its level; a mitigation is always
+            // hardware. λ (FIT) lives on the element; a function is typed HW/SW/SYS.
+            archType:    kind === 'element'
+                         ? (mitigation ? 'hardware'
+                            : (['hardware','system','subsystem'].includes(archType) ? archType
+                               : ((CONFIG.archTypeByLevel[level] && CONFIG.archTypeByLevel[level].default) || null)))
+                         : null,
+            lambdaBase:  kind === 'element' ? (lambdaBase != null ? Math.max(0, +lambdaBase || 0) : null) : null,
+            lambdaUnit:  kind === 'element' ? (lambdaUnit === 'ph' ? 'ph' : 'fit') : null,
+            fnType:      kind === 'function' ? (['HW','SW','SYS'].includes(fnType) ? fnType : 'HW') : null,
             x:           x || 0,
             y:           y || 0
         };
@@ -78,6 +92,17 @@
         return this.groups.filter(g => g.kind === 'element' && g.mitigation);
     },
     isMitigationElement(g) { return !!(g && g.kind === 'element' && g.mitigation); },
+    /* Flip a LOW-LEVEL element between an ordinary element and a Mitigation.
+       Only the flag changes — functions, failure modes and net edges are kept,
+       so a misclassified element can be corrected without rebuilding it. (The id
+       prefix, fixed at creation, is cosmetic; every rule keys off this flag.)
+       Refuses anything that is not an existing low-level element. */
+    setElementMitigation(id, isMit) {
+        const g = this.groupById(id);
+        if (!g || g.kind !== 'element' || g.level !== 'low') return false;
+        g.mitigation = !!isMit;
+        return true;
+    },
     isMitigationFailure(eventId) {
         const e = this.eventById(eventId);
         if (!e || !e.groupId) return false;
@@ -92,6 +117,39 @@
         let g = this.groupById(groupId), guard = 0;
         while (g && g.parentId && guard++ < 20) g = this.groupById(g.parentId);
         return g && g.kind === 'element' ? g : (g || null);
+    },
+
+    /* ── Layered model (v7) helpers ───────────────────────────────────────
+       The structural type of an element, falling back to the default for its
+       level when unset (a legacy element, flagged for review on load, still
+       computes sensibly: low ⇒ hardware, mid ⇒ subsystem, top ⇒ system). A
+       Mitigation is always hardware. */
+    archTypeOf(el) {
+        if (!el || el.kind !== 'element') return null;
+        if (el.mitigation) return 'hardware';
+        if (['hardware','system','subsystem'].includes(el.archType)) return el.archType;
+        const byLvl = CONFIG.archTypeByLevel[el.level];
+        return byLvl ? byLvl.default : null;
+    },
+    /* A systematic element (system / subsystem) carries no own rate — it is fed
+       bottom-up through the failure net. Hardware elements carry λ. */
+    isSystematicElement(el) {
+        const t = this.archTypeOf(el);
+        return t === 'system' || t === 'subsystem';
+    },
+    /* The base failure rate λ (FIT) an element provides to its failure modes.
+       Only hardware elements carry one; a systematic element returns 0 (its
+       modes are derived). null λ (not yet entered) reads as 0. */
+    elementLambdaFit(el) {
+        if (!el || el.kind !== 'element') return 0;
+        if (this.isSystematicElement(el)) return 0;
+        return Math.max(0, +el.lambdaBase || 0);
+    },
+    /* The element that owns a failure mode (via its function), or null. */
+    elementOfMode(eventId) {
+        const e = this.eventById(eventId);
+        if (!e || !e.groupId) return null;
+        return this.elementOf(e.groupId);
     },
 
     _uniqueGroupName() {
@@ -189,62 +247,34 @@
         return 'no-mitigation';
     },
 
-    /* Raw dangerous rate λ_D in FIT, before any diagnostic credit. */
+    /* Raw dangerous rate λ_D in FIT, before any diagnostic credit. LAYERED
+       model (v7): the rate is NOT entered on the failure mode — the mode
+       INHERITS its element's base rate λ and takes its FMD share, then the
+       dangerous fraction splits off the dangerous part:
+           λ_mode = λ_element × FMD ;   λ_D = λ_mode × dangerous-fraction
+       Only a hardware element carries λ, so a mode under a systematic (mid/top)
+       element returns 0 here — it is a derived effect fed through the failure
+       net, never a typed rate. A hardware element whose λ is not yet entered
+       also returns 0 (the element is flagged "not characterised" until set). */
     fmedaRawFit(e) {
         if (!e) return 0;
-        if (e.probMode === 'coverage') {
-            // Primitives are the source of truth when present (v2.3.0+):
-            //   λ_D = base λ × FMD × dangerous-fraction.
-            // Older events carry no primitives — fall back to the stored λ_D.
-            if (e.lambdaBase != null) {
-                const base = Math.max(0, +e.lambdaBase || 0);
-                const fmd  = fmt.clamp(e.fmd, 0, 1, 1);
-                const dang = fmt.clamp(e.dangerousFraction, 0, 1, 1);
-                return base * fmd * dang;
-            }
-            return Math.max(0, +e.failureRateRaw || 0);
-        }
-        if (e.probMode === 'rate')     return Math.max(0, +e.failureRate || 0);
-        // direct: PFH given per hour -> FIT = PFH × 1e9; PFD has no rate,
-        // approximate via equivalent constant rate over mission time.
-        if (e.probMode === 'direct') {
-            if (e.directUnit === 'PFH') return Math.max(0, +e.probability || 0) * 1e9;
-            // PFD → equivalent FIT. Combine two effects and take the WORSE
-            // (higher) one:
-            //   • mission-time rate (PFD / t)·1e9 — so that, combined with
-            //     other rates over the mission, its contribution equals PFD;
-            //   • a band floor PFD·1e5 FIT (= PFD·1e-4 /h) — the IEC 61508
-            //     low↔high-demand correspondence (a PFD band maps to the PFH
-            //     band of the same SIL). Without the floor a long mission
-            //     time would dilute a catastrophic probability into a tiny
-            //     rate, letting a 50 % PFD masquerade as ASIL D. The two
-            //     coincide at t = 1e4 h (the reference mission time), so
-            //     normal automotive models are unchanged.
-            // Linear PFD / t is used deliberately, not −ln(1−PFD)/t: the log
-            // form turned an entered 2 % into a displayed 2.02 %.
-            const t = e.missionTimeOverride || this.missionTime || 1;
-            const pfd = Math.max(0, +e.probability || 0);
-            const rate  = t > 0 ? (pfd / t) * 1e9 : 0;
-            const floor = pfd * 1e5;
-            return Math.max(rate, floor);
-        }
-        return 0;
+        const base = this.elementLambdaFit(e.groupId ? this.elementOf(e.groupId) : null);
+        if (!(base > 0)) return 0;
+        const fmd  = fmt.clamp(e.fmd, 0, 1, 1);
+        const dang = fmt.clamp(e.dangerousFraction, 0, 1, 1);
+        return base * fmd * dang;
     },
 
-    /* Safe failure rate λ_S in FIT. Derived from the primitives when present
-       (λ_S = base λ × FMD × (1 − dangerous-fraction)); older events fall back
-       to the stored λ_S mirror. Only meaningful in coverage mode — direct/rate
-       modes carry no safe/dangerous split (λ_S = 0). */
+    /* Safe failure rate λ_S in FIT — the non-dangerous part of the mode's
+       inherited rate: λ_S = λ_element × FMD × (1 − dangerous-fraction). 0 when
+       the element carries no rate (systematic, or λ not yet entered). */
     fmedaSafeFit(e) {
         if (!e) return 0;
-        if (e.probMode !== 'coverage') return 0;
-        if (e.lambdaBase != null) {
-            const base = Math.max(0, +e.lambdaBase || 0);
-            const fmd  = fmt.clamp(e.fmd, 0, 1, 1);
-            const dang = fmt.clamp(e.dangerousFraction, 0, 1, 1);
-            return base * fmd * (1 - dang);
-        }
-        return Math.max(0, +e.failureRateSafe || 0);
+        const base = this.elementLambdaFit(e.groupId ? this.elementOf(e.groupId) : null);
+        if (!(base > 0)) return 0;
+        const fmd  = fmt.clamp(e.fmd, 0, 1, 1);
+        const dang = fmt.clamp(e.dangerousFraction, 0, 1, 1);
+        return base * fmd * (1 - dang);
     },
 
     /* LOCAL residual: dangerous-undetected rate in FIT from this failure's
@@ -341,21 +371,51 @@
     fmedaPropagatedResidual(eventId, _stack) {
         const e = this.eventById(eventId);
         if (!e) return 0;
-        const own = this.fmedaIsDerived(eventId) ? 0 : this.fmedaResidualFit(e);
-        const incoming = this.failIncoming(eventId);
-        if (!incoming.length) return own;
-        _stack = _stack || new Set();
-        if (_stack.has(eventId)) {           // cycle — break it, keep own
-            this._failCycleSeen = true;
-            return own;
-        }
-        _stack.add(eventId);
-        const srcRates = incoming.map(ed =>
-            this.fmedaPropagatedResidual(ed.from, _stack));
-        _stack.delete(eventId);
+        const derived = this.fmedaIsDerived(eventId);
+        const isMit   = this.isMitigationFailure(eventId);
+        // Own contribution:
+        //  · derived (systematic mid/top): 0 — a pure roll-up of its causes.
+        //  · MITIGATION leaf: its own RAW dangerous rate. A mitigation has no
+        //    separate self-DC — its diagnostic coverage acts on the rate flowing
+        //    THROUGH it (the incoming), not on itself, unless coverageIncludesSelf
+        //    is set (handled in _mitigationResidual).
+        //  · ordinary leaf: its local residual = raw after its own DC.
+        const ownRaw = derived ? 0 : this.fmedaRawFit(e);
+        const own    = isMit ? ownRaw : (derived ? 0 : this.fmedaResidualFit(e));
 
-        return own + this._combineFit(srcRates, this.failGateOf(eventId),
+        const incomingEdges = this.failIncoming(eventId);
+        let incoming = 0;
+        if (incomingEdges.length) {
+            _stack = _stack || new Set();
+            if (_stack.has(eventId)) {           // cycle — break it, keep own
+                this._failCycleSeen = true;
+                return isMit ? this._mitigationResidual(e, 0, ownRaw) : own;
+            }
+            _stack.add(eventId);
+            const srcRates = incomingEdges.map(ed =>
+                this.fmedaPropagatedResidual(ed.from, _stack));
+            _stack.delete(eventId);
+            incoming = this._combineFit(srcRates, this.failGateOf(eventId),
                                 e.missionTimeOverride || this.missionTime || 1);
+        }
+
+        // A MITIGATION reduces the incoming rate by its DC and adds its own
+        // (un-self-diagnosed) rate; an ordinary node adds the incoming on top of
+        // its own residual unchanged (the incoming is not re-covered here).
+        if (isMit) return this._mitigationResidual(e, incoming, ownRaw);
+        return own + incoming;
+    },
+
+    /* The residual leaving a MITIGATION failure mode, per the layered model:
+         coverageIncludesSelf = false →  incoming × (1 − DC) + own
+         coverageIncludesSelf = true  → (incoming + own) × (1 − DC)
+       `own` is the mitigation's RAW dangerous rate (it has no separate self-DC;
+       DC is the coverage it applies to what flows through it). */
+    _mitigationResidual(e, incoming, ownRaw) {
+        const dc = fmt.clamp(e.diagnosticCoverage, 0, 1, 0);
+        return e.coverageIncludesSelf
+            ? (incoming + ownRaw) * (1 - dc)
+            : incoming * (1 - dc) + ownRaw;
     },
 
     /* Combine a list of FIT rates by an AND/OR gate (shared by the raw and
@@ -427,7 +487,7 @@
             const res = this.fmedaPropagatedResidual(e.id);
             const handled = derived
                 ? this.fmedaComputedDC(e.id) > 0           // derived: handled by upstream
-                : (this.fmedaIsHandled(e) || e.probMode === 'coverage');
+                : (this.fmedaIsHandled(e) || (+e.diagnosticCoverage || 0) > 0);
             if (!fnAgg.has(fn.id)) {
                 const el = this.elementOf(fn.id);
                 fnAgg.set(fn.id, {
@@ -550,34 +610,97 @@
             a.spfm = a.lambdaTotal > 0 ? 1 - rf / a.lambdaTotal : null;
             const mpfBase = a.lambdaTotal - rf;
             a.lfm  = mpfBase > 0 ? 1 - a.lambdaMPFlatent / mpfBase : null;
-            // IEC 61508-2 Route 1ₕ architectural cap from this element's SFF,
-            // type and HFT (per-element only; the total is an aggregate).
-            if (isElement) a.route1hSil = fmt.route1hMaxSil(a.elementType, a.sff, a.hft);
+            // IEC 61508-2 Route 1ₕ architectural cap from this element's Type and
+            // SFF, with the HFT COMPUTED from its redundancy structure (never the
+            // stale stored field). A datasheet-declared SFF (claimedSff), when
+            // present, is the SFF of record — it overrides the computed one for
+            // both the headline and Route 1ₕ. Per-element only; the total is an
+            // aggregate.
+            if (isElement) {
+                if (a.claimedSff != null) a.sff = a.claimedSff;
+                a.hft = this.fmedaComputedHft(a.id);
+                a.route1hSil = fmt.route1hMaxSil(a.elementType, a.sff, a.hft);
+                if (a.claimedSff != null) a.claimed = true;
+            }
             // Achieved integrity per standard, from these AGGREGATED metrics —
             // the standard-correct element/item band (NOT a single function's).
-            // ISO uses PMHF/SPFM/LFM; IEC uses the claimable SIL (PFH band
-            // capped by Route 1ₕ). The TOTAL's IEC cap is the system limiter,
-            // assigned by the caller below, so its `achievedSil` is stamped
-            // there; the ASIL has no such dependency and is stamped here.
+            // ISO is metric-gated (PMHF/SPFM/LFM); IEC is the PFH band capped by
+            // Route 1ₕ. The TOTAL's IEC cap is the system limiter, assigned by the
+            // caller below; the ASIL has no such dependency and is stamped here.
             a.achievedAsil = fmt.achievedBand(a, true);
             if (isElement) a.achievedSil = fmt.achievedBand(a, false);
-            // Supplier claim (elements only): the element's integrity is the
-            // user's declaration, computed purely from it (Route 1ₕ on the
-            // claimed SFF, or the claimed capability used directly).
-            if (isElement && (a.claimedSff != null || a.claimedCapability)) {
-                const c = this._resolveClaim(a);
-                if (c.has) {
-                    a.claimed = true;
-                    a.claimSff = c.sff;
-                    a.claimCapability = a.claimedCapability || null;
-                    if (c.sff != null)          a.sff = c.sff;
-                    if (c.route1hSil != null)   a.route1hSil  = c.route1hSil;
-                    if (c.achievedSil != null)  a.achievedSil = c.achievedSil;
-                    if (c.achievedAsil != null) a.achievedAsil = c.achievedAsil;
+            // Declared capability = SYSTEMATIC-CAPABILITY CEILING (elements only).
+            // It is ALWAYS a ceiling — the entered failure data drives the band,
+            // and the declaration can only pull it DOWN, never lift it. There is
+            // no policy toggle: "an ASIL-B controller cannot self-diagnose its way
+            // to ASIL-D." The cap applies per matching lens (ASIL claim → ASIL
+            // band; SIL claim → SIL band). The uncapped bands are kept for the UI.
+            //   The ONE exception is a DECLARED-ONLY element — one with a
+            // capability but no entered failure data (its row was filled at the
+            // band's worst case below): there the band simply IS the declaration,
+            // since there is no measured evidence to drive or contradict it.
+            if (isElement) {
+                a.achievedAsilUncapped = a.achievedAsil;
+                a.achievedSilUncapped  = a.achievedSil;
+                if (a.claimedSff != null || a.claimedCapability) {
+                    const c = this._resolveClaim(a);
+                    if (c.has) {
+                        a.claimed = true;
+                        a.claimSff = c.sff;
+                        a.claimCapability = a.claimedCapability || null;
+                        if (a._worstCase) {
+                            // No measured data — the declaration is the band.
+                            if (c.sff != null)          a.sff         = c.sff;
+                            if (c.route1hSil != null)   a.route1hSil  = c.route1hSil;
+                            if (c.achievedSil != null)  a.achievedSil = c.achievedSil;
+                            if (c.achievedAsil != null) a.achievedAsil = c.achievedAsil;
+                        } else {
+                            if (c.achievedSil  != null) a.achievedSil  = fmt.silMin(a.achievedSil,  c.achievedSil);
+                            if (c.achievedAsil != null) a.achievedAsil = fmt.asilMin(a.achievedAsil, c.achievedAsil);
+                        }
+                    }
                 }
+                a.cappedByCapability = (a.achievedAsil !== a.achievedAsilUncapped) ||
+                                       (a.achievedSil  !== a.achievedSilUncapped);
             }
             return a;
         };
+        // ── Declared-capability worst-case roll-up for an UN-detailed element.
+        // When a low-level element carries a declared capability but no entered
+        // failure rate, its contribution is taken at the WORST CASE of that band
+        // (top of the band) so a declared "SIL 2 / ASIL B" element still rolls up
+        // correctly before its datasheet numbers are filled in. Once a base λ is
+        // entered, that data drives the element and this fallback steps aside (the
+        // declared capability remains the ceiling, applied in finalize).
+        const _wcKeys = { lambdaSD: 0, lambdaSU: 0, lambdaDD: 0, lambdaRF: 0,
+                          lambdaMPFdp: 0, lambdaMPFlatent: 0 };
+        this.elementGroups().forEach(el => {
+            const isLeaf = !!(el.mitigation || el.level === 'low');
+            if (!isLeaf || !el.claimedCapability) return;
+            // Entered failure data drives the element; the worst-case fallback is
+            // only for a declared element that has NO base rate yet.
+            if (this.elementLambdaFit(el) > 0) return;
+            const wc = fmt.worstCaseFitForCapability(el.claimedCapability);
+            if (wc == null) return;                              // QM → no rate
+            let row = byEl.get(el.id);
+            if (row) {
+                // Remove this element's entered-data λ from the total, then set
+                // it to the worst-case rate and add that back.
+                Object.keys(total).forEach(k => { if (typeof total[k] === 'number') total[k] -= (row[k] || 0); });
+                Object.assign(row, _wcKeys, { lambdaTotal: wc, lambdaDU: wc, lambdaSPF: wc, count: 1, _worstCase: true });
+            } else {
+                row = Object.assign(blank(), _wcKeys, {
+                    id: el.id, name: el.name, level: el.level || null,
+                    elementType: (el.elementType === 'A') ? 'A' : 'B',
+                    hft: Math.max(0, Math.min(2, parseInt(el.hft, 10) || 0)),
+                    claimedSff: (el.claimedSff != null) ? fmt.clamp(el.claimedSff, 0, 1, null) : null,
+                    claimedCapability: el.claimedCapability || null, _worstCase: true,
+                    lambdaTotal: wc, lambdaDU: wc, lambdaSPF: wc, count: 1
+                });
+                byEl.set(el.id, row);
+            }
+            Object.keys(row).forEach(k => { if (typeof row[k] === 'number' && k in total) total[k] += (row[k] || 0); });
+        });
         finalize(total, false);
         const elements = Array.from(byEl.values()).map(a => finalize(a, true));
         // System architectural cap = the most limiting element's Route 1ₕ SIL
@@ -633,16 +756,49 @@
             byFn.set(fnId, agg);
         });
 
-        // Functions: metric-gated band over their modes (ISO via PMHF/SPFM/LFM,
-        // IEC via the PFH band — no Route 1ₕ cap, which is element-level).
+        // Functions: rate-driven ASIL (PMHF) and SIL (λ_DU / propagated
+        // residual), then CAPPED to the owning element's achieved band — a
+        // function is no more integrous than the hardware element that
+        // implements it (kills "SIL-4 function on a SIL-2 element"). A function
+        // with no rate is not characterised → '—' (no claim on the canvas).
+        const elBandById = {};
+        elements.forEach(e => { elBandById[e.id] = { asil: e.achievedAsil, sil: e.achievedSil }; });
+        const _asilOrder = ['—', 'QM', 'ASIL A', 'ASIL B', 'ASIL C', 'ASIL D'];
+        const _arank = b => _asilOrder.indexOf(b);
+        const capAsil = (b, ceil) => {
+            if (b === '—') return '—';
+            if (ceil == null) return b;
+            if (ceil === '—') return '—';
+            const rb = _arank(b), rc = _arank(ceil);
+            return (rb < 0 || rc < 0) ? b : (rb <= rc ? b : ceil);
+        };
+        const capSil = (b, ceil) => {
+            if (b === '—') return '—';
+            if (ceil == null) return b;
+            if (ceil === '—') return '—';
+            return fmt.silMin(b, ceil);
+        };
         const functions = Array.from(byFn.values()).map(a => {
-            finalize(a, false);                       // sets spfm/lfm/achievedAsil
-            a.achievedSil = fmt.achievedBand(a, false);
-            // A subtree-aggregated (derived) function: keep its SIL the PFH band
-            // of its OWN propagated residual, unchanged from the pre-fix value
-            // (finalize would otherwise band it off Σλ_DU of the leaves, which
-            // differs from the residual once an AND gate collapses faults).
-            if (a.residualFit != null) a.achievedSil = fmt.silForPfh(a.residualFit * 1e-9);
+            finalize(a, false);                       // sets spfm/lfm/achievedAsil (rate-driven)
+            // A subtree-aggregated (derived) function bands its SIL off its OWN
+            // propagated residual; a residual of 0 is not characterised → '—'.
+            if (a.residualFit != null) {
+                a.achievedSil = (a.residualFit > 0)
+                    ? fmt.silForPfh(a.residualFit * 1e-9)
+                    : (a.lambdaTotal > 0 ? fmt.achievedBand(a, false) : '—');
+            } else {
+                a.achievedSil = fmt.achievedBand(a, false);
+            }
+            // Cap both scales to the owning element's achieved band.
+            const ec = a.elementId != null ? elBandById[a.elementId] : null;
+            if (ec) {
+                a.achievedAsilUncapped = a.achievedAsil;
+                a.achievedSilUncapped  = a.achievedSil;
+                a.achievedAsil = capAsil(a.achievedAsil, ec.asil);
+                a.achievedSil  = capSil(a.achievedSil, ec.sil);
+                a.cappedByElement = (a.achievedAsil !== a.achievedAsilUncapped) ||
+                                    (a.achievedSil  !== a.achievedSilUncapped);
+            }
             return a;
         });
         return { total, elements, functions };
@@ -660,7 +816,7 @@
                     DC₂ without DC₁, a derived effect with no wired cause, a
                     declared claim the rate cannot support).
        Returns [{ level, msg }]. */
-    fmedaValidate() {
+    fmedaValidate(lensIso) {
         const out = [];
         if (this.mode !== 'FMEDA') return out;
         const add = (level, msg) => out.push({ level, msg });
@@ -699,43 +855,99 @@
             if (this.fmedaIsDerived(e.id)) {
                 // A derived (top/mid) effect IS the effect, not the cause: it takes
                 // its numbers BOTTOM-UP from the leaf failure modes wired into it.
-                // That is the intended pattern, so a derived effect that inherits its
-                // figures from a wired source is NOT a problem and must not warn.
-                if (this.failIncoming(e.id).length === 0) {
+                // A wired effect is the intended pattern (no warning); an UN-wired
+                // one has no rate to inherit, so its rate stays 0.
+                if (this.failIncoming(e.id).length === 0)
                     add('warn', `Derived effect "${nm}" has no contributing cause wired — draw a failure-net link from the leaf failure mode(s) that cause it, or its rate stays 0.`);
-                    // Only an UN-WIRED derived effect that STILL carries authored
-                    // numbers is the genuine data-loss case: a mode authored as a leaf
-                    // (rate / diagnostic coverage / safe rate), then its element
-                    // promoted to mid/top WITHOUT re-wiring it to its leaf causes. The
-                    // old figures linger in the file but no longer count, so the rate
-                    // silently reads 0. We surface them ONLY here — once the effect is
-                    // wired to its source (the intended case), inheriting the leaf
-                    // numbers is exactly what should happen and any value stored on the
-                    // effect is simply unused, not an error, so we stay silent.
-                    const ignored = [];
-                    const authoredRate =
-                        (e.probMode === 'coverage' && ((+e.lambdaBase > 0) || (e.lambdaBase == null && +e.failureRateRaw > 0))) ||
-                        (e.probMode === 'rate' && +e.failureRate > 0);
-                    if (authoredRate)                       ignored.push('a failure rate');
-                    if (+e.diagnosticCoverage > 0)          ignored.push('a diagnostic coverage (DC₁)');
-                    if (+e.diagnosticCoverageLatent > 0)    ignored.push('a latent-fault coverage (DC₂)');
-                    if (+e.failureRateSafe > 0)             ignored.push('a safe failure rate (λ_S)');
-                    if (ignored.length)
-                        add('warn', `Derived effect "${nm}" also stores ${ignored.join(', ')} that is IGNORED — wire it to its leaf cause(s), then clear these fields (or move the value to the leaf cause) so the model reads what it computes.`);
-                }
                 return;
             }
             const dc1  = +e.diagnosticCoverage || 0;
             const dc2  = +e.diagnosticCoverageLatent || 0;
-            const base = +e.lambdaBase || +e.failureRateRaw || 0;
+            // The rate is now inherited from the element (λ × FMD), so "DC with no
+            // rate" means the element has no λ, or this mode's FMD/dangerous
+            // fraction is 0 — the coverage then has nothing to act on.
+            const base = this.fmedaRawFit(e);
             const dang = e.dangerousFraction;
             if (dc1 > 0 && base <= 0)
-                add('warn', `Failure mode "${nm}" has diagnostic coverage but no failure rate — the coverage has no effect until a rate is entered.`);
+                add('warn', `Failure mode "${nm}" has diagnostic coverage but no dangerous rate — set its element's base λ, and the mode's FMD / dangerous fraction, or the coverage has nothing to act on.`);
             if (dc2 > 0 && dc1 <= 0)
                 add('warn', `Failure mode "${nm}" has latent-fault coverage (DC₂) but no single-point coverage (DC₁) — DC₂ credits the check that follows the primary mechanism, so it has no effect without DC₁.`);
             if (dang != null && (dang < 0 || dang > 1))
                 add('warn', `Failure mode "${nm}" has a dangerous fraction outside 0–100%.`);
         });
+
+        // ── Layered-model element checks (v7) ─────────────────────────────
+        // (i)  FMD shares of one element's modes must not exceed 100% — the FMD
+        //      apportions ONE component rate across its modes.
+        // (ii) A hardware element that owns modes but has no base λ entered is not
+        //      yet characterised — its modes compute 0 until λ is set.
+        // (iii)A systematic element (system / subsystem) owning modes but fed by
+        //      nothing rolls up to 0 — wire its causes.
+        // (iv) A computed band that disagrees with a declared claim (either way).
+        const fmdByEl = new Map();   // elementId → { sum, name, count }
+        this.events.forEach(e => {
+            if (e.kind !== 'basic' || !e.groupId) return;
+            if (this.fmedaIsDerived(e.id)) return;
+            const el = this.elementOf(e.groupId);
+            if (!el) return;
+            const rec = fmdByEl.get(el.id) || { sum: 0, name: el.name, count: 0 };
+            rec.sum += fmt.clamp(e.fmd, 0, 1, 1);
+            rec.count += 1;
+            fmdByEl.set(el.id, rec);
+        });
+        fmdByEl.forEach((rec, id) => {
+            if (rec.sum > 1 + 1e-9)
+                add('warn', `Element "${rec.name}" (${id}): its failure mode distribution sums to ${Math.round(rec.sum * 100)}% and must not exceed 100%. Adjust the failure mode shares.`);
+        });
+        this.elementGroups().forEach(el => {
+            const ownModes = this.events.some(e =>
+                e.kind === 'basic' && e.groupId && this.elementOf(e.groupId) === el);
+            if (!ownModes) return;
+            if (!this.isSystematicElement(el)) {
+                if (!(this.elementLambdaFit(el) > 0))
+                    add('warn', `Element "${el.name}" (${el.id}): no failure rate or declared safety capability has been provided, so its integrity cannot be established.`);
+            } else {
+                const fed = this.events.some(e =>
+                    e.kind === 'basic' && e.groupId && this.elementOf(e.groupId) === el &&
+                    this.failIncoming(e.id).length > 0);
+                if (!fed)
+                    add('warn', `Element "${el.name}" (${el.id}) is not yet realized by lower-level elements; its integrity cannot be determined until they are defined.`);
+            }
+        });
+        // A leaf whose integrity is taken from its DECLARED CAPABILITY but has no
+        // failure data entered: accepted at the band's worst case, with a concise
+        // notice pointing to the element (incomplete information is normal).
+        this.elementGroups().forEach(el => {
+            const isLeaf = !!(el.mitigation || el.level === 'low');
+            if (!isLeaf || !el.claimedCapability) return;
+            const hasModes = this.events.some(e => e.kind === 'basic' && e.groupId && this.elementOf(e.groupId) === el);
+            const hasData  = hasModes || (this.elementLambdaFit(el) > 0);
+            if (!hasData)
+                add('info', `Element "${el.name}" (${el.id}): integrity is taken from its declared capability; detailed failure data has not been provided.`);
+        });
+        // ── ASIL-D-without-redundancy advisory (ISO lens only) ───────────────
+        // ISO 26262 has no Route 1ₕ table, so HFT is NOT a hard cap on the ASIL
+        // band — but reaching ASIL D on a single channel is unusual and must be
+        // argued (decomposition / dedicated measures). When an element reaches or
+        // claims ASIL D and the tool detects no hardware fault tolerance from the
+        // diagram (computed HFT < 1), raise an INFO inviting that justification.
+        // It never moves the band — it is purely advisory, the SIL lens is
+        // untouched, and the two lenses do not interfere.
+        if (lensIso) {
+            const bandState = this.fmedaElementBandState(true);
+            this.elementGroups().forEach(el => {
+                const st = bandState[el.id];
+                if (!st || st.band !== 'ASIL D') return;
+                if (this.fmedaComputedHft(el.id) >= 1) return;
+                add('info', `Element "${el.name}" (${el.id}) reaches ASIL D but no hardware redundancy (HFT ≥ 1) is detected in the architecture — ASIL D on a single channel must be justified (e.g. ASIL decomposition over independent, redundant elements, or dedicated measures with a freedom-from-interference argument).`);
+            });
+        }
+
+        // A computed-vs-declared mismatch is surfaced in the UI via the band
+        // state's `mismatch` flag (computed headline + declared note). The
+        // OPTIMISTIC direction (a claim the evidence cannot back) is also caught
+        // by the over-claim cross-check above; a conservative claim (the element
+        // computes better than it declares) is fine and not warned.
 
         // ── Declared capability the computed metrics cannot back ──────────
         // Since v3.0.0 an element's band is a DECLARATION, not inferred from
@@ -764,7 +976,7 @@
             const sup = bestBand[el.id];
             if (cr < 0 || !sup) return;               // no rankable functions
             if (cr > sup.rank)
-                add('warn', `Element "${el.name}" (${el.id}) declares ${claimedBand}, but its functions' computed metrics reach only ${sup.band}. Either the claim is optimistic, or the failure-mode coverage / rates must improve to back it.`);
+                add('warn', `Element "${el.name}" (${el.id}) declares ${claimedBand}, but the supporting evidence reaches only ${sup.band}. Review the declared capability or the underlying analysis.`);
         });
         // ── Structural monitors (architecture vs failure net) ─────────────
         // These only run when an architecture net has actually been drawn —
@@ -817,6 +1029,29 @@
                     add('warn', `Failure mode "${e.name || e.id}" never propagates to a top-level effect through the failure net — wire it to the effect(s) it causes, or its contribution has no modelled system consequence.`);
             });
         }
+        // ── Lens-mismatch info (only when a results lens is supplied) ──────
+        // An element may declare an integrity the active lens cannot render: a
+        // SIL capability (or a claimed SFF → Route 1ₕ) viewed under the
+        // ISO 26262 (ASIL) lens, or an ASIL capability viewed under the
+        // IEC 61508 (SIL) lens. The declaration is still there — it simply does
+        // not resolve in the current vocabulary. Point the user at the lens that
+        // does show it, so they know the picture is incomplete. Info-level: it is
+        // guidance, not an error or a modelling smell. Skipped when no lens is
+        // given (programmatic / invariant calls), so existing behaviour and the
+        // report are unaffected.
+        if (lensIso !== undefined) {
+            const lensNow   = lensIso ? 'ISO 26262 (ASIL)' : 'IEC 61508 (SIL)';
+            const lensOther = lensIso ? 'IEC 61508 (SIL)'  : 'ISO 26262 (ASIL)';
+            const stNow   = this.fmedaElementBandState(!!lensIso);
+            const stOther = this.fmedaElementBandState(!lensIso);
+            this.elementGroups().forEach(el => {
+                const now = stNow[el.id], other = stOther[el.id];
+                if (now && other && !now.computed && other.computed) {
+                    add('info', `${el.name || el.id} declares an integrity level that the active ${lensNow} lens cannot display; it resolves only under ${lensOther}. Switch the results lens to ${lensOther} to see the complete picture for this element.`);
+                }
+            });
+        }
+
         return out;
     },
 
@@ -870,7 +1105,14 @@
         const lamD = this.fmedaRawFit(e);                  // dangerous rate
         const lamS = this.fmedaSafeFit(e);                 // safe rate λ_S
         if (!(lamD > 0) && !(lamS > 0)) return null;
-        const dc1 = fmt.clamp(e.diagnosticCoverage, 0, 1, 0);
+        // A MITIGATION mode's diagnostic coverage acts on the rate flowing
+        // THROUGH it, not on its own faults — so for the mitigation's OWN
+        // metric contribution it self-detects only when marked self-diagnosing.
+        // An ordinary mode's DC₁ covers its own dangerous rate as usual.
+        const isMit = this.isMitigationFailure(e.id);
+        const dc1 = isMit
+            ? (e.coverageIncludesSelf ? fmt.clamp(e.diagnosticCoverage, 0, 1, 0) : 0)
+            : fmt.clamp(e.diagnosticCoverage, 0, 1, 0);
         const dc2 = fmt.clamp(e.diagnosticCoverageLatent, 0, 1, 0);
         const hasSM = dc1 > 0;
         return {
@@ -981,35 +1223,96 @@
         return a;
     },
 
+    /* ── Hardware fault tolerance (HFT), COMPUTED from the failure net ─────────
+       HFT is never entered by hand — it is read from the architecture, per the
+       standard definition (the number of faults an element tolerates before its
+       safety function is lost). Redundancy is an AND convergence in the failure
+       net: the higher failure occurs only if ALL its causes fail (parallel), so
+       losing one leaves the others holding the function. Crucially, redundancy is
+       only HARDWARE fault tolerance when the channels are genuinely independent —
+       on DISTINCT elements AND free from interference (no shared upstream cause).
+       Two modes in one element, or two "channels" with a common cause behind
+       them, are one channel, not two. This is also why you cannot self-diagnose
+       your way up: adding diagnostic coverage changes SFF/SPFM but never HFT;
+       only an independent redundant element raises HFT.
+
+         HFT(element) = max over its safety-relevant failure modes of
+                        (independent distinct-element channels AND-converging
+                         into the mode − 1), clamped to [0, 2] (Route 1ₕ stops
+                        at 2). A leaf with no incoming, a single cause, or an OR
+                        convergence ⇒ HFT 0. */
+    fmedaComputedHft(elementId) {
+        const el = this.groupById(elementId);
+        if (!el || el.kind !== 'element') return 0;
+        const modes = this.events.filter(e =>
+            e.kind === 'basic' && e.groupId && this.elementOf(e.groupId) === el);
+        let best = 0;
+        modes.forEach(m => { best = Math.max(best, this._fmedaModeHft(m.id)); });
+        return Math.max(0, Math.min(2, best));
+    },
+
+    /* The fault tolerance of ONE failure mode: independent AND-converging
+       channels minus one. The incoming causes are grouped into independent
+       channels — two causes sharing an owning element OR a common ancestor cause
+       fall into the same channel (no independence between them). Only channels
+       anchored to a real element count as hardware. OR / single cause ⇒ 0. */
+    _fmedaModeHft(modeId) {
+        if (this.failGateOf(modeId) !== 'AND') return 0;
+        const incoming = this.failIncoming(modeId);
+        if (incoming.length < 2) return 0;
+        const channels = [];   // [{ elements:Set<id>, ancestors:Set<modeId> }]
+        incoming.forEach(ed => {
+            const ev   = this.eventById(ed.from);
+            const elId = ev && ev.groupId ? ((this.elementOf(ev.groupId) || {}).id || null) : null;
+            const anc  = this._fmedaAncestors(ed.from);     // Set, includes ed.from
+            let host = null;
+            for (const ch of channels) {
+                const shareEl  = elId && ch.elements.has(elId);
+                const shareAnc = [...anc].some(a => ch.ancestors.has(a));
+                if (shareEl || shareAnc) { host = ch; break; }
+            }
+            if (host) {
+                if (elId) host.elements.add(elId);
+                anc.forEach(a => host.ancestors.add(a));
+            } else {
+                channels.push({ elements: new Set(elId ? [elId] : []), ancestors: new Set(anc) });
+            }
+        });
+        const hwChannels = channels.filter(ch => ch.elements.size > 0);
+        return Math.max(0, hwChannels.length - 1);
+    },
+
+    /* Every upstream cause failure-mode id feeding `modeId` transitively
+       (including itself). Cycle-safe — used to test channel independence. */
+    _fmedaAncestors(modeId, _seen) {
+        _seen = _seen || new Set();
+        if (_seen.has(modeId)) return _seen;
+        _seen.add(modeId);
+        this.failIncoming(modeId).forEach(ed => this._fmedaAncestors(ed.from, _seen));
+        return _seen;
+    },
+
     /* Achieved-integrity STATE per architecture element, in the active lens
        (iso=true → ASIL, false → SIL). The SINGLE source the canvas, the right
        pane and the report all read, so they can never disagree on whether an
-       element shows a band — or on why it doesn't. Returns a map
-         { elementId: { id, band, computed, reason } }
-       with `band` the integrity string (null when none), `computed` true when a
-       band is shown, and `reason` one of:
-         · 'claimed'    — the element DECLARES its integrity (a claimed SFF read
-                          through Route 1ₕ with its Type/HFT, or a claimed
-                          SIL/ASIL capability used directly). Since v3.0.0 an
-                          architecture element's band comes ONLY from this
-                          declaration — it is NOT inferred from its functions or
-                          their aggregated metrics. The quantitative numbers live
-                          on the functions and failure modes (and the system
-                          total); the element carries the engineering claim.
-         · 'undeclared' — the element owns failure modes but declares no SFF or
-                          capability, so it shows no band (only its functions/FMs
-                          carry computed figures).
-         · 'empty'      — the element owns no failure modes at all.
-       NOTE: the per-element subtree aggregation (fmedaElementLeaves /
-       _fmedaAggregateLeaves) is retained and tested, but is NOT used to band an
-       ELEMENT — that contract changed in v3.0.0. It is the basis for the
-       metric-gated band of a derived FUNCTION (see fmedaMetrics), so a top/mid
-       function's ASIL matches the leaf/system instead of a rate-only ladder. */
+       element shows a band — or why it doesn't. v7 (the layered model) bands an
+       element from BOTH its computed numbers and any declared claim:
+         · COMPUTED — a hardware element from its own modes' roll-up; a systematic
+                      element from what the failure net feeds into it. This is the
+                      headline band (the contract reversed from the v3.0.0
+                      declared-only rule, which was a stopgap while the computed
+                      band was wrong).
+         · DECLARED — a supplier SFF→Route 1ₕ or a claimed SIL/ASIL, shown
+                      alongside the computed band (and flagged when they disagree).
+         · ERROR    — neither numbers nor a declaration: the element is not yet
+                      characterised, rendered red.
+       The per-element subtree aggregation (fmedaElementLeaves / _fmedaAggregate-
+       Leaves) is now what bands the element (via _fmedaElementComputedBand), and
+       also bands a derived FUNCTION (see fmedaMetrics). */
     /* Resolve an element's declared integrity into a band, purely from the
        user's declaration (Route 1ₕ on a claimed SFF with the element's Type/HFT,
-       or a claimed capability used directly). The architecture element relies
-       ONLY on this declaration — never on the functions' rates. If both a
-       claimed SFF and a claimed capability are given, the more limiting governs.
+       or a claimed capability used directly). If both a claimed SFF and a claimed
+       capability are given, the more limiting governs.
        Returns { has, route1hSil, achievedSil, achievedAsil, sff }. */
     _resolveClaim(el) {
         const out = { has: false, route1hSil: null, achievedSil: null, achievedAsil: null, sff: null };
@@ -1033,34 +1336,120 @@
         return out;
     },
 
+    /* The achieved band an element earns FROM ITS NUMBERS, in the active lens
+       (iso=true → ASIL, false → SIL), plus whether it has the numbers to compute
+       one at all. The single computed-band primitive behind the element state.
+         · A HARDWARE element is banded from its own failure modes: PMHF/PFH from
+           the propagated residual of its modes (which captures any internal
+           mitigation reduction or AND-gate convergence), with SPFM/LFM/SFF and
+           the Route 1ₕ cap from those modes. It "has numbers" once its base λ is
+           entered AND it owns at least one failure mode.
+         · A SYSTEMATIC element (system / subsystem) carries no own λ — it is
+           banded from what rolls up into its (derived) modes through the failure
+           net. It "has numbers" once at least one of its modes is FED by an
+           incoming failure-net edge (gated on the connection, not the rate, so a
+           deliberate 0-FIT input still counts), and the band uses the propagated
+           residual + the aggregated metrics of the feeding subtree.
+       Returns { band, hasNumbers, needs } where `needs` (when hasNumbers is
+       false) is 'lambda' | 'modes' | 'incoming' — what the element is missing. */
+    _fmedaElementComputedBand(el, iso) {
+        if (!el || el.kind !== 'element') return { band: null, hasNumbers: false, needs: 'modes' };
+        const systematic = this.isSystematicElement(el);
+        const ownModes = this.events.filter(e =>
+            e.kind === 'basic' && e.groupId && this.elementOf(e.groupId) === el);
+        if (!ownModes.length) {
+            return { band: null, hasNumbers: false,
+                     needs: systematic ? 'incoming' : (this.elementLambdaFit(el) > 0 ? 'modes' : 'lambda') };
+        }
+        if (systematic) {
+            if (!ownModes.some(m => this.failIncoming(m.id).length > 0))
+                return { band: null, hasNumbers: false, needs: 'incoming' };
+        } else {
+            if (!(this.elementLambdaFit(el) > 0))
+                return { band: null, hasNumbers: false, needs: 'lambda' };
+        }
+        // Band from the AGGREGATED metrics of the leaves feeding this element's
+        // modes (Σλ_DU → PMHF, gated by SPFM/LFM under ISO; PFH band capped by
+        // Route 1ₕ under IEC). The Route 1ₕ cap is computed for THIS element from
+        // its own Type, its aggregate SFF, and the HFT deduced from the
+        // redundancy structure (fmedaComputedHft) — so a redundant subsystem
+        // earns the higher tier its independence buys, and a single channel does
+        // not. A systematic (subsystem/system) element is by nature complex, so
+        // its Route 1ₕ Type is B; a low element uses its declared Type.
+        const leaves = this.fmedaElementLeaves(el.id);
+        const agg = this._fmedaAggregateLeaves(leaves, null);
+        // A datasheet-declared SFF overrides the computed one (same rule the
+        // per-element metrics use); Type is B for a complex subsystem, the
+        // declared Type for a low element; HFT is the computed redundancy.
+        const sff  = (el.claimedSff != null) ? fmt.clamp(el.claimedSff, 0, 1, agg.sff) : agg.sff;
+        const type = systematic ? 'B' : (el.elementType === 'A' ? 'A' : 'B');
+        const r1   = fmt.route1hMaxSil(type, sff, this.fmedaComputedHft(el.id));
+        agg.sff = sff;
+        agg.route1hSil = (r1 && r1 !== '—') ? r1 : null;
+        return { band: fmt.achievedBand(agg, iso), hasNumbers: true, needs: null };
+    },
+
     fmedaElementBandState(iso) {
         const out = {};
         if (this.mode !== 'FMEDA') return out;
-        // Elements that own at least one failure mode (so they are "started").
-        const hasModes = {};
-        this.events.forEach(e => {
-            if (e.kind !== 'basic' || !e.groupId) return;
-            const el = this.elementOf(e.groupId);
-            if (el) hasModes[el.id] = true;
-        });
-        const set = (id, band, computed, reason) => {
-            out[id] = { id, band, computed, reason };
-        };
-        // An architecture element's SIL/ASIL is the integrity the user DECLARES
-        // for it (claimed SFF → Route 1ₕ with its Type/HFT, or a claimed
-        // capability used directly). It is NOT inferred from the functions or
-        // their metrics — the functions and failure modes carry the computed
-        // numbers; the element carries the engineering claim. No declaration ⇒
-        // the element shows no band ('undeclared'), only its functions/FMs.
+        // An element's band now comes from BOTH sources (v7): the COMPUTED band
+        // from its own numbers (the layered roll-up) is the headline, and a
+        // DECLARED supplier claim is shown alongside (as today). When both exist
+        // and disagree, that is surfaced as a mismatch. An element with NEITHER
+        // numbers NOR a declaration is an ERROR (rendered red) — it is not yet
+        // characterised. Returns, per element:
+        //   { id, band, computed, reason, computedBand, declaredBand,
+        //     hasNumbers, hasClaim, mismatch, needs }
+        // reason ∈ 'computed' | 'claimed' | 'computed+claimed' | 'lens' | 'error'.
         this.elementGroups().forEach(el => {
-            if (el.claimedCapability || el.claimedSff != null) {
-                const c = this._resolveClaim(el);
-                const band = iso ? c.achievedAsil : c.achievedSil;
-                if (band) { set(el.id, band, true, 'claimed'); return; }
-                // e.g. a SFF-only claim under the ISO lens has no ASIL meaning.
-                set(el.id, null, false, 'undeclared'); return;
+            const claim = this._resolveClaim(el);
+            const claimedBand = claim.has ? (iso ? claim.achievedAsil : claim.achievedSil) : null;
+            const comp = this._fmedaElementComputedBand(el, iso);
+            const rawComputed = (comp.hasNumbers && comp.band && comp.band !== '—') ? comp.band : null;
+
+            // The declared capability is the SYSTEMATIC-CAPABILITY CEILING: the
+            // computed (hardware) band may be pulled DOWN to it, never shown above
+            // it — an ASIL-B controller cannot self-diagnose its way to ASIL-D.
+            // The cap applies only within the matching lens (an ASIL claim caps
+            // the ASIL band; a SIL claim the SIL band), so a cross-lens claim
+            // leaves the computed band untouched.
+            let computedBand = rawComputed;
+            let capped = false;
+            if (rawComputed && claimedBand) {
+                const lim = iso ? fmt.asilMin(rawComputed, claimedBand)
+                                : fmt.silMin(rawComputed, claimedBand);
+                capped = (lim !== rawComputed);
+                computedBand = lim;
             }
-            set(el.id, null, false, hasModes[el.id] ? 'undeclared' : 'empty');
+
+            const band = computedBand || claimedBand || null;
+            let reason;
+            if (computedBand && claimedBand)    reason = 'computed+claimed';
+            else if (computedBand)              reason = 'computed';
+            else if (claimedBand)               reason = 'claimed';
+            else if (claim.has)                 reason = 'lens';   // declared, but not in this lens
+            else                                reason = 'error';  // no numbers, no claim → red
+
+            out[el.id] = {
+                id: el.id,
+                band,
+                computed: !!band,           // a band is shown (computed OR claimed)
+                reason,
+                computedBand,
+                rawComputedBand: rawComputed,   // the hardware band BEFORE the ceiling
+                declaredBand: claimedBand,
+                cappedByCapability: capped,
+                hasNumbers: comp.hasNumbers,
+                hasClaim: claim.has,
+                // A mismatch worth flagging is an OVER-claim: the declaration is
+                // higher than the hardware supports. The hardware computing better
+                // than (and being capped to) the declaration is expected, not a
+                // mismatch.
+                mismatch: !!(rawComputed && claimedBand &&
+                             (iso ? fmt.asilRank(claimedBand) > fmt.asilRank(rawComputed)
+                                  : fmt.silRank(claimedBand) > fmt.silRank(rawComputed))),
+                needs: comp.needs           // what's missing when hasNumbers is false
+            };
         });
         return out;
     },
@@ -1085,24 +1474,31 @@
     fmedaElementsForDisplay(iso) {
         const ru = this.fmedaRollup();
         const st = this.fmedaElementBandState(iso);
-        const rows = ru.elements.map(e => {
-            const s = st[e.id] || { band: null, computed: false, reason: 'empty' };
-            return Object.assign({}, e, {
-                band: s.band, bandComputed: s.computed, bandReason: s.reason
-            });
+        const annotate = (base, s) => Object.assign({}, base, {
+            band: s.band, bandComputed: s.computed, bandReason: s.reason,
+            declaredBand: s.declaredBand, computedBand: s.computedBand,
+            rawComputedBand: s.rawComputedBand, cappedByCapability: s.cappedByCapability,
+            hasNumbers: s.hasNumbers, hasClaim: s.hasClaim,
+            mismatch: s.mismatch, needs: s.needs,
+            archType: this.archTypeOf(this.groupById(s.id))
         });
-        // A pure black-box subsystem (a supplier claim but no internal modes)
-        // won't be in the roll-up — append it so its claimed band still shows.
+        const rows = ru.elements.map(e =>
+            annotate(e, st[e.id] || { band: null, computed: false, reason: 'error' }));
+        // Append elements that are NOT in the roll-up (no rate-bearing modes):
+        // a claim-only black-box subsystem, an element awaiting input (lens), or
+        // an uncharacterised element (error → red). So every declared OR
+        // not-yet-characterised element still appears.
         const present = new Set(rows.map(r => r.id));
         this.elementGroups().forEach(el => {
             if (present.has(el.id)) return;
             const s = st[el.id];
-            if (!s || !s.computed || s.reason !== 'claimed') return;
-            rows.push({
-                id: el.id, name: el.name, level: el.level || null,
-                rawFit: 0, residualFit: 0, integrityFit: 0, pfh: 0,
-                band: s.band, bandComputed: true, bandReason: 'claimed'
-            });
+            if (!s) return;
+            if (s.reason === 'claimed' || s.reason === 'error' || s.reason === 'lens') {
+                rows.push(annotate({
+                    id: el.id, name: el.name, level: el.level || null,
+                    rawFit: 0, residualFit: 0, integrityFit: 0, pfh: 0
+                }, s));
+            }
         });
         return rows.sort((a, b) => {
             if (a.bandComputed !== b.bandComputed) return a.bandComputed ? -1 : 1;
@@ -1195,6 +1591,32 @@
     /* Incoming failure-net edges (causes) of a target failure. */
     failIncoming(targetId) {
         return this.netEdgesOf('fail').filter(e => e.to === targetId);
+    },
+
+    /* Should a node display a COMPUTED integrity band on the canvas / panel?
+       A LEAF node (low-level element, or a mitigation — both hold editable leaf
+       failure modes) always may. A DERIVED node (mid- or top-level element, and
+       the functions on it) may ONLY once a failure-net connection actually feeds
+       it. Until then its propagated rate is an empty 0 FIT, which would read as a
+       spurious ASIL D / SIL 4 ("everything is max by default"). Note this gates
+       on the CONNECTION, not on the rate: a deliberately 0-FIT leaf wired into a
+       mid/top node (e.g. "software never fails") IS fed, so its band still shows. */
+    fmedaFunctionFed(fnId) {
+        const el = this.elementOf(fnId);
+        const derived = !!el && (el.level === 'mid' || el.level === 'top');
+        if (!derived) return true;
+        return this.events.some(e =>
+            e.kind === 'basic' && e.groupId === fnId &&
+            this.failIncoming(e.id).length > 0);
+    },
+    fmedaElementFed(elId) {
+        const el = this.groupById(elId);
+        const derived = !!el && (el.level === 'mid' || el.level === 'top');
+        if (!derived) return true;
+        return this.functionGroups().some(fn => {
+            const owner = this.elementOf(fn.id);
+            return owner && owner.id === elId && this.fmedaFunctionFed(fn.id);
+        });
     },
     /* (fmedaIsDerived now lives next to the propagation logic above and is
        decided by element LEVEL, not by incoming edges.) */

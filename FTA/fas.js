@@ -244,6 +244,15 @@ class Project {
                only: it does NOT alter the residual rate (mitigating a common
                cause by independence does not lower the single mode's λ). */
             commonCauseMitigated: false,
+            /* Mitigation self-diagnosis (v7). Meaningful only on a failure mode
+               inside a Mitigation element. false ⇒ the mitigation reduces the
+               INCOMING rate by its DC but its OWN rate is added in full (a
+               diagnostic does not check itself):
+                   residual = incoming × (1 − DC) + own
+               true ⇒ the coverage also applies to its own rate:
+                   residual = (incoming + own) × (1 − DC)
+               Ignored on an ordinary (non-mitigation) failure mode. */
+            coverageIncludesSelf: false,
             /* Safety target — meaningful only on the top event. A single
                value from CONFIG.targetCombined (e.g. 'ASIL A', 'SIL 2',
                'QM'). The previous design carried separate targetSIL and
@@ -425,6 +434,21 @@ class Project {
             claimedSff:        g.kind === 'element'
                          ? (g.claimedSff != null ? fmt.clamp(g.claimedSff, 0, 1, null) : null) : null,
             claimedCapability: g.kind === 'element' ? (g.claimedCapability || null) : null,
+            // Layered model (v7). Absent in older files ⇒ null, which the loader
+            // surfaces as "review this element" (the rate moved to the element and
+            // is not present yet). NOT auto-derived from the modes — see fromJSON.
+            //   archType:   'hardware' | 'system' | 'subsystem' (element only).
+            //   lambdaBase: the element's base failure rate λ (FIT); hardware only
+            //               in practice, but parsed for any element. null ⇒ unset.
+            //   lambdaUnit: 'fit' | 'ph' — how λ was entered/shown (stored FIT).
+            //   fnType:     'HW' | 'SW' | 'SYS' (function only).
+            archType:    g.kind === 'element'
+                         ? (['hardware','system','subsystem'].includes(g.archType) ? g.archType : null) : null,
+            lambdaBase:  g.kind === 'element'
+                         ? (g.lambdaBase != null ? Math.max(0, +g.lambdaBase || 0) : null) : null,
+            lambdaUnit:  g.kind === 'element' ? (g.lambdaUnit === 'ph' ? 'ph' : 'fit') : null,
+            fnType:      g.kind === 'function'
+                         ? (['HW','SW','SYS'].includes(g.fnType) ? g.fnType : null) : null,
             x: +g.x || 0, y: +g.y || 0
         }));
 
@@ -463,6 +487,7 @@ class Project {
                 diagnosticEvidence:  e.diagnosticEvidence || '',
                 mitigation:          e.mitigation || '',
                 commonCauseMitigated: !!e.commonCauseMitigated,
+                coverageIncludesSelf: !!e.coverageIncludesSelf,
                 target:              target
             };
         });
@@ -557,6 +582,10 @@ class Project {
         }
         const v = +obj.version || 1;
         const p = new Project(obj.name || '');
+        // Remember the on-disk format version so the app can warn that a
+        // pre-layered-model (v7) project is missing element rates / types and
+        // must be reviewed. Intentionally NOT used to migrate any data.
+        p._loadedFileVersion = v;
         p.missionTime = fmt.posNum(obj.missionTime, CONFIG.defaultMissionTime) ||
                         CONFIG.defaultMissionTime;
         // Results lens — older files (no `standard`) default to ISO 26262.

@@ -96,6 +96,69 @@ const main = (() => {
                                     _modelChanged();
                                   },
             applyGroupDelete:     id => { project.deleteGroup(id);   _modelChanged(); },
+            applyFunctionSpawn:   (existingId, patch, elementIds, copyFmIds) => {
+                                    // Fan a function out across the chosen elements.
+                                    // EDIT: the opened function is updated and moved
+                                    // to the FIRST element; every additional element
+                                    // gets an independent COPY — the original's own
+                                    // failure modes are duplicated into it, plus any
+                                    // explicitly copied ones. CREATE: an independent
+                                    // copy is made in EVERY chosen element.
+                                    const ids = (elementIds || []).filter(Boolean);
+                                    if (!ids.length) return null;
+                                    const copyInto = fnId => (copyFmIds || [])
+                                        .forEach(sid => project.copyFailureModeInto(sid, fnId));
+                                    let firstId = null;
+                                    if (existingId) {
+                                        project.updateGroup(existingId,
+                                            Object.assign({}, patch, { parentId: ids[0] }));
+                                        copyInto(existingId);
+                                        firstId = existingId;
+                                        const ownFmIds = project.events
+                                            .filter(e => e.kind === 'basic' && e.groupId === existingId)
+                                            .map(e => e.id);
+                                        ids.slice(1).forEach(elId => {
+                                            const g = project.addGroup(
+                                                Object.assign({}, patch, { kind: 'function', parentId: elId }));
+                                            ownFmIds.forEach(sid => project.copyFailureModeInto(sid, g.id));
+                                            copyInto(g.id);
+                                        });
+                                    } else {
+                                        ids.forEach((elId, i) => {
+                                            const g = project.addGroup(
+                                                Object.assign({}, patch, { kind: 'function', parentId: elId }));
+                                            copyInto(g.id);
+                                            if (i === 0) firstId = g.id;
+                                        });
+                                    }
+                                    _modelChanged();
+                                    _revealNew(firstId);
+                                    return firstId;
+                                  },
+            applyEventSpawn:      (existingId, spec, fnIds) => {
+                                    // Failure-mode equivalent of applyFunctionSpawn for
+                                    // EDIT: update the opened mode and move it to the
+                                    // first function; spawn an independent copy into
+                                    // each additional function. (CREATE keeps using
+                                    // applyEventCreateMulti.)
+                                    const ids = (fnIds || []).filter(Boolean);
+                                    if (!ids.length) return null;
+                                    project.updateEvent(existingId,
+                                        Object.assign({}, spec, { groupId: ids[0] }));
+                                    ids.slice(1).forEach(fnId =>
+                                        _placeNewEvent(Object.assign({}, spec, { groupId: fnId })));
+                                    _modelChanged();
+                                    _revealNew(existingId);
+                                    return existingId;
+                                  },
+            applyConvertMitigation: (id, isMit) => {
+                                    if (project.setElementMitigation(id, isMit)) {
+                                        _modelChanged();
+                                        _flash(isMit
+                                            ? 'Converted to a mitigation element.'
+                                            : 'Converted to a regular element.');
+                                    }
+                                  },
             applyDomainSave:      (id, d) => {
                                     // Visual-only: a domain never touches a rate
                                     // or band, so the model is "changed" for the
@@ -179,6 +242,9 @@ const main = (() => {
        controls panel. Used both by the toggle and on project load. */
     function _syncModeUI(mode) {
         const m = ['ETA','FMEDA'].includes(mode) ? mode : 'FTA';
+        // The palette is about to re-render with its checkbox unchecked, so drop
+        // any in-progress connection and the sticky flag to stay in sync.
+        _netLink = null; _netLinkSticky = false;
         document.querySelectorAll('.mode-btn').forEach(b =>
             b.classList.toggle('on', b.getAttribute('data-appmode') === m));
         catalog.setMode(m);
@@ -196,6 +262,17 @@ const main = (() => {
     function _bindEvents() {
         document.getElementById('fileInput')
             .addEventListener('change', _handleUpload);
+
+        // The (?) beside the canvas hint opens the consolidated "how the tool
+        // works" explainer (the FMEDA layered model + workflow).
+        const hiw = document.getElementById('howItWorksBtn');
+        if (hiw) hiw.addEventListener('click', e => {
+            e.stopPropagation();
+            const t = CONFIG.helpTopics && CONFIG.helpTopics.howItWorks;
+            if (t && typeof modal !== 'undefined')
+                modal.open(t.title, `<div class="dlg-help-body">${t.body}</div>`,
+                    [{ label: 'Close', cls: 'btn-primary', onClick: modal.close }]);
+        });
 
         const pill = document.getElementById('projectNamePill');
         if (pill) pill.addEventListener('click', e => {
@@ -224,7 +301,7 @@ const main = (() => {
         });
         document.addEventListener('keydown', e => {
             if (e.key === 'Escape') {
-                if (_netLink) { _netLink = null; _flash('Net link cancelled.'); }
+                if (_netLink) { _netLink = null; canvas.deselectAll(); _flash('Connection cancelled.'); }
                 document.body.classList.remove('show-catalog', 'show-controls');
             }
         });
@@ -398,17 +475,29 @@ const main = (() => {
         _unsaved = true;
         _refreshCanvas();
         controls.renderProject(project);
-        // A model edit invalidates the last computed result. In FMEDA the
-        // residual roll-up is cleared outright (it must be recomputed before
-        // it means anything); FTA/ETA keep their last analysis on screen but
-        // flag it stale.
+        // A model edit invalidates the last computed result. FTA/ETA keep their
+        // last analysis on screen but flag it stale. FMEDA used to clear its
+        // panel here (so warnings/info/bands only came back on Recalculate) —
+        // instead we recompute the roll-up RIGHT NOW so the residual numbers,
+        // element bands and validation Checks track every canvas edit live.
         if (project && project.mode === 'FMEDA') {
             _lastAnalysis = null;
-            controls.clearAnalysis();
+            _refreshFmedaPanel();
         } else {
             controls.markDirty();
         }
         _updateHeaderName();
+    }
+
+    /* Recompute the FMEDA roll-up and push it to the panel. Cheap (no separate
+       analyzer pass), so it runs on every model edit for a live panel, and is
+       also what Recalculate calls. */
+    function _refreshFmedaPanel() {
+        if (!project || project.mode !== 'FMEDA') return;
+        const rollup = project.fmedaRollup();
+        rollup.safetyRequirements = project.safetyRequirements();
+        rollup.metrics = project.fmedaMetrics();
+        controls.applyFmedaRollup(rollup);
     }
 
     function _updateHeaderName() {
@@ -441,7 +530,7 @@ const main = (() => {
 
     /* ── catalog handlers ────────────────────────────────────────── */
 
-    function _onCatalogPick(kind) {
+    function _onCatalogPick(kind, arg) {
         if (!project) return;
         switch (kind) {
             case 'event-basic':
@@ -485,6 +574,17 @@ const main = (() => {
             case 'fmeda-net-fail':
                 _fmedaStartNetLink(kind.replace('fmeda-net-', ''));
                 break;
+            case 'fmeda-net-sticky':
+                _netLinkSticky = !!arg;
+                if (!_netLinkSticky && _netLink && !_netLink.from) {
+                    // Turned off before picking a node: drop the idle arm too.
+                    _netLink = null;
+                    canvas.deselectAll();
+                    _flash('Connect tool off.');
+                } else if (_netLinkSticky) {
+                    _flash('Keep-connecting on — the connect tool will stay active after each link.');
+                }
+                break;
         }
     }
 
@@ -518,10 +618,13 @@ const main = (() => {
             alert('Add an architecture element first — a function lives inside one.');
             return;
         }
+        // Pre-select the element only when one is actually in context (selected
+        // on the canvas). With nothing selected, leave the picker empty so the
+        // user chooses deliberately rather than silently defaulting to the first.
         const parentId = (_fmedaSel.elementId &&
                           project.groupById(_fmedaSel.elementId) &&
                           project.groupById(_fmedaSel.elementId).kind === 'element')
-            ? _fmedaSel.elementId : elements[0].id;
+            ? _fmedaSel.elementId : null;
         dialogs.openGroupEdit(null, {
             kind: 'function', parentId,
             name: 'Function ' + (project.functionGroups().length + 1)
@@ -534,14 +637,13 @@ const main = (() => {
             alert('Add a function first — a failure mode lives inside one.');
             return;
         }
-        const fnId = (_fmedaSel.functionId &&
-                      project.groupById(_fmedaSel.functionId) &&
-                      project.groupById(_fmedaSel.functionId).kind === 'function')
-            ? _fmedaSel.functionId : fns[0].id;
-        // Draft a new failure mode; openEventEdit(null, draft) commits only
-        // on Save.
+        // Do NOT auto-pick a function. Opening the picker with nothing selected
+        // makes the user choose deliberately (picking the wrong auto-selected
+        // function was confusing). The editor's multi-select then accepts one or
+        // more functions, and saving with none chosen shows a gentle inline note
+        // rather than a raw validation error.
         dialogs.openEventEdit(null, 'event-basic', {
-            groupId: fnId, x: 0, y: 0,
+            groupId: null, x: 0, y: 0,
             name: 'Failure mode ' + (project.basicEvents().length + 1)
         });
     }
@@ -552,17 +654,23 @@ const main = (() => {
 
     /* Net-link connect flow: prompt the user to click two nodes of the
        right type. State is held in _netLink; the canvas tap handler
-       (below) completes the edge. */
+       (below) completes the edge. _netLinkSticky ("Keep connecting") keeps the
+       tool armed after each link so several can be drawn in a row. */
     let _netLink = null;
+    let _netLinkSticky = false;
+    function _netLinkHint(net) {
+        return net === 'fail'
+            ? 'Click the CAUSE failure first (the root), then the failure it propagates to.'
+            : (net === 'arch' ? 'Click the first element, then the one it connects to.'
+                              : 'Click the first function, then the one it connects to.');
+    }
     function _fmedaStartNetLink(net) {
         _netLink = { net, from: null };
         canvas.setActiveNet(net);     // show the net we're editing
         controls.setActiveNet(net);   // and sync the toggle highlight
-        const first = net === 'fail'
-            ? 'Click the CAUSE failure first (the root), then the failure it propagates to.'
-            : (net === 'arch' ? 'Click the first element, then the one it connects to.'
-                              : 'Click the first function, then the one it connects to.');
-        _flash(first + ' Esc to cancel.');
+        _flash(_netLinkHint(net) +
+               (_netLinkSticky ? ' Keep-connecting is on — uncheck or Esc to stop.'
+                               : ' Esc to cancel.'));
     }
     function _fmedaNetClick(nodeId, nodeType) {
         if (!_netLink) return false;
@@ -579,11 +687,21 @@ const main = (() => {
         }
         // from = cause/source, to = effect/target. Direction matters for the
         // failure net (cause → effect drives the common-cause finding).
-        const ed = project.addNetEdge({
-            net: _netLink.net, from: _netLink.from, to: nodeId });
-        _netLink = null;
+        const net = _netLink.net, from = _netLink.from;
+        const ed = project.addNetEdge({ net, from, to: nodeId });
         if (ed) { _unsaved = true; controls.markDirty(); _refreshCanvas(); controls.renderProject(project); }
-        else    { _flash('These two could not be connected.'); }
+        // The click is finished either way: drop the canvas selection so
+        // nothing stays visually "held" (the deselect-on-finish fix), then
+        // either re-arm for the next pair (sticky) or stand the tool down.
+        canvas.deselectAll();
+        if (_netLinkSticky) {
+            _netLink = { net, from: null };
+            _flash(ed ? 'Connected — click the next pair, or uncheck "Keep connecting" / press Esc to stop.'
+                      : 'Those two could not be connected — try another pair, or press Esc to stop.');
+        } else {
+            _netLink = null;
+            _flash(ed ? 'Connection added.' : 'These two could not be connected.');
+        }
         return true;
     }
 
@@ -737,10 +855,7 @@ const main = (() => {
         // dangerous-undetected rate per failure mode, rolled up per
         // function and element, and shows it in the panel.
         if (project.mode === 'FMEDA') {
-            const rollup = project.fmedaRollup();
-            rollup.safetyRequirements = project.safetyRequirements();
-            rollup.metrics = project.fmedaMetrics();
-            controls.applyFmedaRollup(rollup);
+            _refreshFmedaPanel();
             _refreshCanvas();   // refresh handled/green coloring too
             return;
         }
@@ -825,7 +940,8 @@ const main = (() => {
         const url  = URL.createObjectURL(blob);
         const a    = document.createElement('a');
         a.href     = url;
-        a.download = (project.name || 'fas-project').replace(/\s+/g, '_') + '.fas';
+        a.download = (project.name || 'fas-project').replace(/\s+/g, '_') +
+                     '_' + fmt.isoDate() + '.fas';
         a.click();
         URL.revokeObjectURL(url);
         _unsaved = false;   // work has been saved to a file
@@ -845,6 +961,15 @@ const main = (() => {
                 activeScenario = null;
                 _lastAnalysis  = null;
                 _activate();
+                // A pre-layered-model (v7) project has its rates on the failure
+                // modes and no element λ / types — the rate now lives one layer
+                // up. Warn the user to review: affected elements show as not
+                // characterised until their λ / type is set.
+                if (project.mode === 'FMEDA' &&
+                    project._loadedFileVersion != null &&
+                    project._loadedFileVersion < (CONFIG.fileVersion || 7)) {
+                    _flash('Loaded an older project. The failure rate now lives on the architecture element (its λ) — review each element: set its base λ (hardware) or type (systematic). Elements without it show as “not characterised”.');
+                }
             } catch (err) {
                 alert('Could not load project: ' + err.message);
             }
@@ -882,7 +1007,7 @@ const main = (() => {
         init,
         newProject, downloadProject, triggerUpload, exportReport,
         getProject: () => project,
-        _test_pickCatalog: (kind) => _onCatalogPick(kind),
+        _test_pickCatalog: (kind, arg) => _onCatalogPick(kind, arg),
         _test_fmedaNodeClick: (id, type, targetId) => _onFmedaNodeClick(id, type, targetId)
     };
 })();

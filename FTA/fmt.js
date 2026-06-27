@@ -134,6 +134,49 @@ const fmt = (() => {
         return 'QM';
     }
 
+    /* Worst-case FIT for a DECLARED capability (SIL/ASIL) — the top of that
+       band, i.e. the highest rate still inside it. Used when an element's
+       integrity comes from its declaration rather than from entered failure
+       data: the calculation then assumes this worst case. QM (no finite target)
+       and unknown values return null. */
+    function worstCaseFitForCapability(cap) {
+        if (!cap) return null;
+        const t = (CONFIG.targetCombined || []).find(x => x.value === cap);
+        if (!t || !isFinite(t.pfh)) return null;
+        return t.pfh * 1e9;            // PFH/h → FIT
+    }
+
+    function asilRank(a) {
+        const i = ['—', 'QM', 'ASIL A', 'ASIL B', 'ASIL C', 'ASIL D'].indexOf(a);
+        return i < 0 ? 1 : i;
+    }
+    function asilMin(a, b) {
+        if (a == null) return b; if (b == null) return a;
+        return asilRank(a) <= asilRank(b) ? a : b;
+    }
+
+    /* Rate-driven ASIL: the highest ASIL whose ISO 26262-5 PMHF target ALONE is
+       met by the achieved PMHF. SPFM/LFM are NOT gated here — they are reported
+       as evidence and warned on separately, so improving (or neglecting) them
+       never silently moves the band. ASIL B and C share the 1e-7 PMHF target, so
+       a PMHF in [1e-8, 1e-7) is graded ASIL C (the higher rung the rate
+       supports). Returns an ASIL string, 'QM', or '—' when PMHF is unavailable. */
+    function asilFromPmhf(pmhf) {
+        if (pmhf == null || isNaN(pmhf)) return '—';
+        if (pmhf < 1e-8) return 'ASIL D';
+        if (pmhf < 1e-7) return 'ASIL C';
+        if (pmhf < 1e-5) return 'ASIL A';
+        return 'QM';
+    }
+
+    /* Mean time between (dangerous) failures, in hours, from a FIT rate
+       (failures per 1e9 h): MTBF = 1e9 / λ_FIT. Returns null for a non-positive
+       or unavailable rate (an MTBF claim needs a real rate). */
+    function mtbfHoursFromFit(fitTotal) {
+        if (fitTotal == null || isNaN(fitTotal) || fitTotal <= 0) return null;
+        return 1e9 / fitTotal;
+    }
+
     /* Highest ASIL whose ISO 26262-5 hardware targets are ALL met by the
        achieved metrics: PMHF < target (/h) AND SPFM ≥ target AND LFM ≥ target.
        ASIL B/C/D are metric-gated. ISO 26262-5 sets NO quantitative SPFM/LFM
@@ -204,25 +247,33 @@ const fmt = (() => {
         return ra <= rb ? a : b;
     }
 
-    /* Achieved integrity band from an AGGREGATED FMEDA metrics object — the
-       integrity an element (or the whole item) earns from its random-hardware
-       metrics, per the active standard. This is the standard-correct basis: it
-       is computed over ALL of the unit's failure modes, NOT inferred from a
-       single "best" function.
-         ISO 26262: the highest ASIL whose PMHF, SPFM and LFM are ALL met
-           (asilFromMetrics) for B/C/D; below that, QM or ASIL A from the rate.
-         IEC 61508: the claimable SIL = the lower of the PFH-band SIL (from the
-           residual dangerous-undetected rate λ_DU) and the Route 1ₕ
-           architectural cap (silMin).
-       Pure: a read of the metrics object only, no model state. `m` is a
-       metrics row from Project.fmedaMetrics() (an element or the `total`). */
+    /* Achieved integrity band from an AGGREGATED FMEDA metrics object, per the
+       active standard. v3.8.0 — the band is the MOST LIMITING of the rate target
+       and the architecture, never the rate alone (a 5 FIT mode with SPFM 0 is not
+       ASIL D; a single-channel Type B with a fast rate is not SIL 4). The two
+       standards are kept strictly apart — the lenses never borrow each other's
+       constructs:
+         · ISO 26262 (iso=true): metric-gated ASIL — the highest ASIL whose PMHF,
+           SPFM and LFM targets are ALL met (asilFromMetrics). SPFM/LFM are
+           gates, not evidence: diagnostic coverage that lifts SPFM is real, but
+           the band still cannot exceed what the metrics support. There is NO
+           Route 1ₕ here — Route 1ₕ is an IEC construct.
+         · IEC 61508 (iso=false): the claimable SIL is the PFH band of λ_DU,
+           CAPPED by the Route 1ₕ architectural constraint (Type + SFF + the
+           HFT computed from the redundancy structure). `route1hSil` carries that
+           cap; 'not allowed' (Type B, SFF<60%, HFT 0) collapses the claim to No
+           SIL. Absent (null/'—') ⇒ no cap (SFF not yet known).
+         · NO rate at all (λ_total = 0) ⇒ not characterised ⇒ '—' (no claim), so
+           empty data never reads as the best band.
+       Pure: a read of the metrics object only. `m` is a metrics row from
+       Project.fmedaMetrics() or an aggregate (an element, a function, or the
+       `total`); it must carry spfm/lfm (ISO) or route1hSil (IEC) for the cap to
+       apply. */
     function achievedBand(m, iso) {
-        if (!m) return iso ? '—' : 'No SIL';
-        if (iso) {
-            return asilFromMetrics((m.lambdaSPF + m.lambdaRF) * 1e-9, m.spfm, m.lfm);
-        }
-        const bandSil = silForPfh(m.lambdaDU * 1e-9);
-        return (m.route1hSil == null) ? bandSil : silMin(bandSil, m.route1hSil);
+        if (!m || !(m.lambdaTotal > 0)) return '—';   // not characterised → no claim
+        if (iso) return asilFromMetrics((m.lambdaSPF + m.lambdaRF) * 1e-9, m.spfm, m.lfm);
+        const rate = silForPfh(m.lambdaDU * 1e-9);
+        return (m.route1hSil == null) ? rate : silMin(rate, m.route1hSil);
     }
 
     /* Stored fraction → percent string for an EDITABLE input field.
@@ -330,13 +381,34 @@ const fmt = (() => {
         return ' (' + b + ')';
     }
 
+    /* Today's date (or a given Date) as an ISO 8601 'YYYY-MM-DD' string, built
+       from LOCAL calendar components so it matches the date on the engineer's
+       wall — never off-by-one near midnight the way toISOString() (UTC) can be.
+       Filesystem-safe (hyphens only), sorts chronologically, and matches the
+       releaseDate format in config.js. Used to date-stamp saved projects,
+       exports, and the report header — this is a safety deliverable, so every
+       artifact carries the day it was produced. */
+    function isoDate(d) {
+        // Duck-typed + validity check (robust across realms, e.g. the test vm):
+        // accept any valid Date-like object, otherwise fall back to "now".
+        const ok = d && typeof d.getFullYear === 'function' &&
+                   typeof d.getTime === 'function' && !isNaN(d.getTime());
+        if (!ok) d = new Date();
+        const y   = d.getFullYear();
+        const m   = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return y + '-' + m + '-' + day;
+    }
+
     return {
         escHtml, uid, bumpUid, resetUid,
         clamp, posInt, posNum,
         probStr, fitStr, perHourStr,
         pctStr, pctInputVal, intDot, inHoursStr,
-        sciStr, oneInN, mitigationBandSuffix,
-        pfhDualStr, silForPfh, asilForPfh, asilFromMetrics, iso26262TargetFor,
+        sciStr, oneInN, mitigationBandSuffix, isoDate,
+        pfhDualStr, silForPfh, asilForPfh, asilFromMetrics, asilFromPmhf,
+        mtbfHoursFromFit, worstCaseFitForCapability, asilRank, asilMin,
+        iso26262TargetFor,
         route1hMaxSil, sffBandLabel, silRank, silMin, achievedBand
     };
 })();

@@ -420,6 +420,32 @@ body {
 }
 .cat-label { font-size: 0.78rem; }
 
+/* A sticky toggle in the palette (e.g. "Keep connecting"): a checkbox row that
+   visually matches the .cat-item buttons above it. */
+.cat-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    width: 100%;
+    padding: 0.5rem 0.7rem;
+    background: var(--bg-panel);
+    border: 1px dashed var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--text);
+    margin-bottom: 0.32rem;
+    transition: all 0.12s;
+    box-sizing: border-box;
+}
+.cat-toggle:hover { background: var(--bg-hover); border-color: var(--border-focus); }
+.cat-toggle-box {
+    flex-shrink: 0;
+    width: 24px;          /* same width as .cat-icon, so the label lines up with the items above */
+    display: flex; align-items: center; justify-content: center;
+}
+.cat-toggle input[type="checkbox"] { margin: 0; cursor: pointer; }
+.cat-toggle:has(input:checked) { border-style: solid; border-color: var(--accent); background: var(--accent-light); }
+
 /* ── Middle pane: Canvas ────────────────────────────────────────── */
 .canvas-toolbar {
     height: 38px;
@@ -1628,6 +1654,8 @@ textarea.dlg-inp { font-family: 'Outfit', sans-serif; resize: vertical; }
 }
 .res-m-note { font-size: 0.6rem; color: #999; margin-top: 5px; font-style: italic; }
 .res-m-note--claim { color: var(--accent, #4f46e5); font-style: normal; }
+.res-m-note--lens  { color: #1f4e8a; background: #e7f0fb; border-left: 3px solid #3a7bd4;
+                     font-style: normal; padding: 3px 6px; border-radius: 3px; }
 .res-m-tgt {
     font-size: 0.58rem; color: #9a9890; text-align: right;
     margin: -1px 0 3px; font-style: italic;
@@ -1659,6 +1687,12 @@ textarea.dlg-inp { font-family: 'Outfit', sans-serif; resize: vertical; }
     padding: 0 4px; margin-left: 4px;
 }
 .res-el-card { background: #f6f5f1; }
+/* An element that is not yet characterised (no rate, no claim) — flagged red,
+   reusing the error palette so it reads as "needs attention". */
+.res-el-card--error {
+    background: var(--red-bg, #fdf2f2);
+    border-color: var(--red-border, #f5c6c2);
+}
 .res-qm {
     font-size: 0.64rem; color: #8a5a12; background: #faf0dc;
     border-radius: 3px; padding: 2px 6px; margin-top: 4px;
@@ -1670,6 +1704,7 @@ textarea.dlg-inp { font-family: 'Outfit', sans-serif; resize: vertical; }
 }
 .res-check--warn  { color: #8a5a12; background: #faf0dc; border-color: #d49a2a; }
 .res-check--error { color: #8a1f1f; background: #fbe6e6; border-color: #cc3333; }
+.res-check--info  { color: #1f4e8a; background: #e7f0fb; border-color: #3a7bd4; }
 .dlg-cause-list { margin: 4px 0 8px; padding-left: 18px; font-size: 0.78rem; }
 .dlg-cause-list li { margin: 2px 0; }
 .dlg-cause-id {
@@ -1714,6 +1749,21 @@ textarea.dlg-inp { font-family: 'Outfit', sans-serif; resize: vertical; }
 
 /* Canvas toolbar hint ("Click an event… · Drag to rearrange"). */
 .canvas-hint { font-size: 0.65rem; color: var(--text-dim); }
+/* The (?) "how it works" button beside the canvas hint. */
+.canvas-help-btn {
+    margin-left: 0.45rem;
+    width: 1.15rem; height: 1.15rem; flex: 0 0 auto;
+    border-radius: 50%;
+    border: 1px solid var(--border, #d4d4d8);
+    background: var(--surface, #fff);
+    color: var(--text-dim, #71717a);
+    font-size: 0.72rem; font-weight: 700; line-height: 1;
+    cursor: pointer; padding: 0;
+}
+.canvas-help-btn:hover {
+    border-color: var(--accent, #4f46e5);
+    color: var(--accent, #4f46e5);
+}
 
 /* FMEDA auto-connect option list (stacked checkboxes). */
 .fmeda-autoconnect { display: flex; flex-direction: column; gap: 6px; }
@@ -1774,3 +1824,48 @@ textarea.dlg-inp { font-family: 'Outfit', sans-serif; resize: vertical; }
     max-width: 520px;
     line-height: 1.6;
 }
+/* ── v3.6.0 additions ─────────────────────────────────────────────────── */
+/* Self-diagnostic checkbox row in the failure-mode editor (mitigation modes). */
+.dlg-check {
+    display: flex; align-items: center; gap: 0.4rem;
+    margin: 0.4rem 0 0; font-size: 0.78rem; color: var(--text, #27272a);
+    cursor: pointer;
+}
+.dlg-check input { margin: 0; }
+/* The consolidated "how it works" help modal: keep long content scrollable. */
+/* The "how it works" explainer renders in the standard modal but must read
+   exactly like the per-field help popovers — same typography, lists, code and
+   emphasis — so the help surfaces are one consistent design. */
+.dlg-help-body {
+    max-height: 62vh; overflow-y: auto; padding-right: 0.5rem;
+    font-size: 0.74rem; color: var(--text); line-height: 1.6;
+}
+.dlg-help-body p { margin: 0 0 0.55rem; }
+.dlg-help-body p:last-child { margin-bottom: 0; }
+.dlg-help-body ul { margin: 0 0 0.55rem 1.15rem; }
+.dlg-help-body li { margin: 0.14rem 0; }
+.dlg-help-body code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.72rem;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 0.05rem 0.3rem;
+    color: var(--text);
+}
+.dlg-help-body strong { color: var(--text); font-weight: 700; }
+.dlg-help-body em { color: var(--text-mid); font-style: italic; }
+.dlg-help-body h4 {
+    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--accent, #4f46e5);
+    margin: 1rem 0 0.3rem;
+}
+.dlg-help-body h4:first-child { margin-top: 0; }
+.dlg-help-body .dlg-formula {
+    font-family: 'JetBrains Mono', monospace;
+    background: var(--bg-elevated); border: 1px solid var(--border);
+    border-radius: 3px; padding: 0.4rem 0.5rem; margin: 0.45rem 0;
+    font-size: 0.72rem; overflow-x: auto;
+}
+.dlg-help-body .dlg-formula code { background: none; border: none; padding: 0; }
+

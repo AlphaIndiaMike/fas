@@ -134,7 +134,10 @@ const catalog = (() => {
               hint: 'Connect function ↔ function across elements.' },
             { kind: 'fmeda-net-fail',
               icon: '⇄',  label: 'Failure link',
-              hint: 'Connect failure ↔ failure. One source hitting two functions = common cause.' }
+              hint: 'Connect failure ↔ failure. One source hitting two functions = common cause.' },
+            { kind: 'fmeda-net-sticky', toggle: true,
+              icon: '🔁', label: 'Keep connecting',
+              hint: 'Stay in the connect tool after each link, so you can draw several in a row. Uncheck (or press Esc) to stop.' }
         ]},
         { group: 'Structure', help: null, items: [
             { kind: 'domain',
@@ -171,6 +174,19 @@ const catalog = (() => {
                 : '';
             html += `<div class="cat-group">${fmt.escHtml(group.group)}${helpBtn}</div>`;
             group.items.forEach(it => {
+                if (it.toggle) {
+                    // A sticky toggle (e.g. "keep the connect tool on"). Renders
+                    // as a checkbox + label — no icon box. The checkbox sits in a
+                    // fixed slot the same width as the item icon boxes above, so
+                    // its label lines up with theirs. Its change event carries the
+                    // checked state.
+                    html += `
+                        <label class="cat-toggle" title="${fmt.escHtml(it.hint || '')}">
+                            <span class="cat-toggle-box"><input type="checkbox" class="cat-toggle-cb" data-kind="${it.kind}"></span>
+                            <span class="cat-label">${fmt.escHtml(it.label)}</span>
+                        </label>`;
+                    return;
+                }
                 html += `
                     <button class="cat-item" data-kind="${it.kind}" title="${fmt.escHtml(it.hint)}">
                         <span class="cat-icon">${it.icon}</span>
@@ -181,8 +197,18 @@ const catalog = (() => {
         root.innerHTML = html;
         root.querySelectorAll('.cat-item').forEach(btn => {
             btn.addEventListener('click', () => {
+                // Drop focus immediately so the button doesn't keep the browser's
+                // focus highlight after a click (the "stays selected" effect) —
+                // matters most for the net-link buttons, which only arm a tool.
+                btn.blur();
                 if (!enabled) return;
                 if (_onPick) _onPick(btn.getAttribute('data-kind'));
+            });
+        });
+        root.querySelectorAll('.cat-toggle-cb').forEach(cb => {
+            cb.addEventListener('change', () => {
+                if (!enabled) { cb.checked = false; return; }
+                if (_onPick) _onPick(cb.getAttribute('data-kind'), cb.checked);
             });
         });
     }

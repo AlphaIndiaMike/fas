@@ -13,20 +13,32 @@ const CONFIG = {
        and stamped into exported reports / saved projects. BUMP THIS ON
        EVERY ITERATION of development — patch for fixes, minor for new
        features, major for breaking changes. */
-    appVersion:  '3.4.0',
-    releaseDate: '2026-06-21',
+    appVersion:  '3.8.3',
+    releaseDate: '2026-06-26',
 
     /* JSON file-format version. v2 added direct links; v3 was an earlier
        (now removed) ETA experiment; v4 stores two fully independent
        sub-models — `fta` and `eta` — selected by `mode`. Older files load
        as FTA: their flat top-level arrays become the FTA sub-model and the
-       ETA sub-model starts empty. v6 adds the `mitigation` element flag
-       (Mitigation / M_n elements) and edge-driven additive composition (a
-       failure mode's residual = its own rate + whatever the failure net feeds
-       in, at any level). Both are backward-compatible: the flag is absent
-       (⇒ false) in older files, and a failure mode with no incoming edges
-       computes exactly as before. */
-    fileVersion: 6,
+       ETA sub-model starts empty. v6 added the `mitigation` element flag and
+       edge-driven additive composition. v7 (the LAYERED model) moves the
+       failure rate ONTO the architecture element (λ from a datasheet), which
+       the failure modes inherit and apportion by FMD; adds the element
+       `archType` (hardware / system / subsystem), the function `fnType`
+       (HW / SW / SYS), the mitigation `coverageIncludesSelf` flag, and a
+       COMPUTED element band. There is intentionally NO silent data migration
+       across the v6→v7 boundary: a pre-v7 file carries rates on its failure
+       modes and no element λ, so the tool flags every affected element for
+       review on load (the rate now lives one layer up). Forward compatibility
+       is not a goal — a v7 file is not expected to open in a pre-v7 build.
+       v3.8.0 keeps fileVersion 7: the band computation became lens-correct
+       (metric-gated ASIL, Route-1ₕ-capped SIL) and HFT is now COMPUTED from the
+       failure-net redundancy structure rather than stored, so the per-element
+       `hft` field and the `capPolicy` toggle are no longer written — but the data
+       SHAPE is unchanged, so a v7 file still loads cleanly (a stale `hft` /
+       `capPolicy` is simply ignored and recomputed). Bumping the integer would
+       wrongly trigger the v6→v7 "rates moved to the element" review notice. */
+    fileVersion: 7,
 
     /* Project-wide default mission time, in hours. Used by `rate` and
        `coverage` events that don't override it. 10 000h ≈ 1.14 years
@@ -164,6 +176,48 @@ const CONFIG = {
              [3, 4, 4] ]  // ≥ 99 %
     },
 
+    /* ── The LAYERED model (v7) ────────────────────────────────────────────
+       Architecture-element TYPE. This is the structural classification of an
+       element — distinct from the IEC 61508 Type A/B above (which is a Route 1ₕ
+       complexity input, NOT this). It encodes WHERE a rate comes from:
+         · 'hardware'  — a physical (low-level) element. It is the only kind that
+                         carries a base failure rate λ; its failure modes inherit
+                         and apportion that λ. Mitigation elements are hardware.
+         · 'system'    — a systematic top-level element. Carries NO own rate; it
+                         receives its figures bottom-up through the failure net.
+         · 'subsystem' — a systematic mid-level element. Same: no own rate, fed
+                         from below.
+       The coupling to the swimlane level is fixed: LOW ⇒ hardware (forced);
+       MID ⇒ subsystem (default) or system; TOP ⇒ system (default) or subsystem.
+       Software is never an element — it is allocated onto hardware and modelled
+       as a FUNCTION (fnType 'SW'); see archTypeForLevel / fnTypes below. */
+    archTypes: [
+        { value: 'hardware',  label: 'Hardware',  systematic: false },
+        { value: 'system',    label: 'System',    systematic: true  },
+        { value: 'subsystem', label: 'Subsystem', systematic: true  }
+    ],
+    /* The archType a freshly-typed element defaults to for each level, and the
+       full set the editor offers. LOW is locked to hardware (a low-level element
+       is physical and carries the rate); MID/TOP choose among the systematic
+       types. Keyed by level. */
+    archTypeByLevel: {
+        low: { allowed: ['hardware'],            default: 'hardware'  },
+        mid: { allowed: ['subsystem', 'system'], default: 'subsystem' },
+        top: { allowed: ['system', 'subsystem'], default: 'system'    }
+    },
+
+    /* Function realisation TYPE. A function lives on a (hardware) element and
+       is realised in hardware, software or as a system function; it inherits
+       the reliability of the hardware it runs on regardless. The type is a
+       classification used for labelling and validation — it does NOT scale any
+       rate (the rate flows from the element λ and the mode's FMD). 'SW' exists
+       precisely because software is a function, never a standalone element. */
+    fnTypes: [
+        { value: 'HW',  label: 'Hardware (HW)' },
+        { value: 'SW',  label: 'Software (SW)' },
+        { value: 'SYS', label: 'System (SYS)' }
+    ],
+
     /* Heatmap stops applied to event nodes by their effective PFD on
        a log scale. Anything ≤ minP is fully green; ≥ maxP fully red. */
     heatmap: {
@@ -255,6 +309,40 @@ const CONFIG = {
     /* Help topic registry — clickable (?) buttons reference these by key.
        Centralised so the same explanation never drifts between dialogs. */
     helpTopics: {
+        /* The consolidated "how the tool works" explainer, opened from the (?)
+           beside the canvas instruction. It teaches the FMEDA LAYERED MODEL —
+           how elements, functions, failure modes and mitigations relate and how
+           a band is earned — rather than any single field. Assembled here so the
+           modal and the per-field popovers cannot drift apart. */
+        howItWorks: {
+            title: 'How Functional Analysis Studio works',
+            body:
+                '<p>FAS builds a safety analysis from a <strong>layered model</strong> and reports the achieved <strong>SIL</strong> (IEC 61508) or <strong>ASIL</strong> (ISO 26262) for each part and for the system. Pick the analysis with the mode toggle: <strong>FTA</strong> (fault tree), <strong>ETA</strong> (event tree) or <strong>FMEDA</strong>. The four layers below are the FMEDA model — read them bottom-up, because that is how the rate flows.</p>' +
+                '<h4>1 · Architecture elements — the hardware layer</h4>' +
+                '<p>Elements are the building blocks, placed in three swimlanes:</p>' +
+                '<ul>' +
+                '<li><strong>Low level = hardware.</strong> A physical part. It carries the reliability data: a single base failure rate <strong>λ (FIT)</strong> from a datasheet, reliability prediction or standard. This is the <em>only</em> place a rate is entered.</li>' +
+                '<li><strong>Mid level = subsystem</strong> and <strong>top level = system.</strong> These are <em>systematic</em> elements. They carry no rate of their own — they <strong>receive</strong> their figures bottom-up through the failure net from the hardware below them.</li>' +
+                '</ul>' +
+                '<p>Software is never an element: it does not fail on its own, it runs on hardware — so it appears as a <em>function</em>, not a box in the architecture.</p>' +
+                '<h4>2 · Functions — what the hardware does</h4>' +
+                '<p>Each element hosts one or more <strong>functions</strong>, typed <strong>HW</strong>, <strong>SW</strong> or <strong>SYS</strong> by how they are realised. A function <strong>inherits the reliability of the hardware it runs on</strong>; the type is for traceability, it does not change the numbers.</p>' +
+                '<h4>3 · Failure modes — how a function fails</h4>' +
+                '<p>A function fails through its <strong>failure modes</strong>. A failure mode does not carry its own rate; it <strong>inherits the element\'s λ</strong> and takes a share of it with the <strong>FMD</strong> (failure-mode distribution): <code>λ<sub>mode</sub> = λ<sub>element</sub> × FMD</code>. The FMD shares across an element\'s modes add up to 100%. Each mode then splits into a <strong>dangerous</strong> and a safe part, and its dangerous exposure is reduced by the <strong>diagnostic coverage (DC)</strong> credited to it:</p>' +
+                '<p class="dlg-formula"><code>λ<sub>D</sub> = λ<sub>mode</sub> × dangerous-fraction&nbsp;&nbsp;·&nbsp;&nbsp;λ<sub>DU</sub> = λ<sub>D</sub> × (1 − DC)</code></p>' +
+                '<p>The DC is the credit for a diagnostic that detects the fault; it is justified by a <strong>mitigation</strong> (next layer). The residual undetected-dangerous rate λ<sub>DU</sub> is what propagates upward.</p>' +
+                '<h4>4 · Mitigations — diagnostic layers</h4>' +
+                '<p>A <strong>mitigation</strong> is a diagnostic placed <em>in the failure net</em>. Failures are routed into it and it removes the fraction it covers; the rest passes through. Its own failure rate still counts (a diagnostic can fail) and is not self-covered unless you mark it self-diagnosing:</p>' +
+                '<p class="dlg-formula"><code>residual = incoming × (1 − DC<sub>M</sub>) + own</code>&nbsp;&nbsp;(self-diagnostic: <code>(incoming + own) × (1 − DC<sub>M</sub>)</code>)</p>' +
+                '<p>A mitigation is either a <strong>requirement</strong> you author or a dedicated <strong>hardware</strong> block — both are low-level hardware elements with their own λ.</p>' +
+                '<h4>Connecting it up — the three nets</h4>' +
+                '<p>Connections are drawn like-to-like and shown one net at a time: <strong>architecture</strong> (element↔element), <strong>function</strong> (function↔function) and <strong>failure</strong> (failure↔failure). The failure net is what carries the rate: it is where causes feed effects, where mitigations sit, and where one cause hitting two functions is flagged as a <strong>common cause</strong>.</p>' +
+                '<h4>How the band is earned</h4>' +
+                '<p>The achieved band is the <strong>most limiting</strong> of three things — the dangerous rate, the architectural metrics, and the architecture — never the rate alone. Under <strong>ISO 26262</strong> it is metric-gated: the highest ASIL whose <strong>PMHF</strong>, <strong>SPFM</strong> <em>and</em> <strong>LFM</strong> targets are all met, so coverage only raises the band when the metric it drives actually clears the next rung. Under <strong>IEC 61508</strong> it is the PFH band of λ<sub>DU</sub> <strong>capped by Route 1<sub>H</sub></strong> (element Type, SFF and HFT) — a single-channel Type B with a poor SFF cannot claim a high SIL however good its rate. The two scales are reported one at a time and never paired.</p>' +
+                '<p><strong>Hardware fault tolerance (HFT) is read from the architecture, not typed in.</strong> Redundancy is an <strong>AND</strong> convergence in the failure net — the higher failure needs <em>all</em> its causes — and it only counts when the channels are independent: on <em>distinct</em> elements with <em>no shared upstream cause</em> (freedom from interference). Adding diagnostic coverage changes SFF/SPFM but never HFT; only an independent redundant element raises it.</p>' +
+                '<p>A <strong>declared SIL/ASIL capability</strong> is the element\'s <strong>systematic-capability ceiling</strong>: entered failure data drives the band, and the declaration can only pull it <em>down</em>, never lift it — an ASIL-B controller cannot self-diagnose its way to ASIL D; it needs an external, independent measure. A hardware element is banded from its own modes; a systematic element from what rolls up to it; a function is never better than the element that realises it. An element with <em>no</em> rate and no claim is flagged in red — not yet characterised.</p>' +
+                '<p>Every figure is the <strong>achieved</strong> result, to be checked against the target from your HARA / safety goal. The two scales are reported one at a time and never paired — there is no normative SIL↔ASIL equivalence.</p>'
+        },
         missionTime: {
             title: 'Mission time',
             body:
@@ -338,8 +426,52 @@ const CONFIG = {
         fmd: {
             title: 'Failure-mode distribution (FMD %)',
             body:
-                '<p>The share of the base rate attributable to <em>this</em> failure mode: <code>λ<sub>mode</sub> = λ × FMD</code>. A component usually fails in several modes (open, short, drift, stuck…) whose FMD percentages sum to 100% across its modes.</p>' +
-                '<p>Leave it <strong>100%</strong> when λ is already this single mode rate. Use the datasheet / standard FMD table when you enter one component as several modes.</p>'
+                '<p>The share of the <strong>element\'s</strong> base failure rate attributable to <em>this</em> failure mode: <code>λ<sub>mode</sub> = λ<sub>element</sub> × FMD</code>. A component fails in several modes (open, short, drift, stuck…) whose FMD percentages sum to 100% across the element\'s modes.</p>' +
+                '<p>The rate λ is entered once, on the architecture element (its datasheet FIT). Each failure mode then takes its FMD slice of it — so the FMD is how you spread one component\'s rate across the modes it can exhibit. Use the datasheet / standard FMD table. The tool warns if an element\'s FMD shares add up to more than 100%.</p>'
+        },
+        elementLambda: {
+            title: 'Element base failure rate (λ)',
+            body:
+                '<p>The architecture element\'s total failure rate in <strong>FIT</strong> (1 FIT = 1 failure per 10⁹ h) — the datasheet / reliability-prediction / field number for the physical part. Entered <strong>once, on the element</strong>; every failure mode under it inherits this λ and takes its <strong>FMD</strong> share (<code>λ<sub>mode</sub> = λ × FMD</code>).</p>' +
+                '<p>Only <strong>hardware</strong> elements carry a rate. A <em>systematic</em> element (a mid-level subsystem or a top-level system) carries none — it receives its figures bottom-up through the failure net from the hardware below it. Software has no rate of its own either: it is a function realised on hardware, and inherits that hardware\'s λ.</p>' +
+                '<p>Sources: a component safety datasheet, a reliability prediction (IEC 61709 / SN 29500 / MIL-HDBK-217), or field data.</p>'
+        },
+        archType: {
+            title: 'Element type — hardware / system / subsystem',
+            body:
+                '<p>What kind of architecture element this is. It decides <em>where the rate comes from</em> — and is <strong>not</strong> the IEC 61508 Type A/B above (that is a separate Route 1<sub>H</sub> complexity input).</p>' +
+                '<ul>' +
+                '<li><strong>Hardware</strong> — a physical, low-level element. The only kind that carries a base failure rate λ; its failure modes inherit and apportion it. Mitigation blocks are hardware elements too.</li>' +
+                '<li><strong>Subsystem</strong> — a mid-level systematic element. Carries no own rate; it is fed bottom-up through the failure net by the hardware beneath it.</li>' +
+                '<li><strong>System</strong> — a top-level systematic element. Same: no own rate, computed from what flows up to it.</li>' +
+                '</ul>' +
+                '<p>The level fixes the choice: a <strong>low</strong>-level element is always hardware; a <strong>mid</strong>-level element is a subsystem (or system); a <strong>top</strong>-level element is a system (or subsystem). There is deliberately no "software" element — software is a function (see the function type), because software does not fail on its own; it runs on hardware.</p>'
+        },
+        fnType: {
+            title: 'Function type — HW / SW / SYS',
+            body:
+                '<p>How the function is realised. A function lives on a hardware element and <strong>inherits that hardware\'s reliability</strong> regardless of type — the type is a classification for traceability and review, it does not scale any rate.</p>' +
+                '<ul>' +
+                '<li><strong>HW</strong> — realised directly in hardware (a comparator, a watchdog timer).</li>' +
+                '<li><strong>SW</strong> — realised in software running on the element. Software does not have a random-hardware rate of its own; its random-hardware exposure is that of the hardware it executes on. (Systematic software faults are handled by the development process, not quantified here.)</li>' +
+                '<li><strong>SYS</strong> — a system-level function spanning several parts.</li>' +
+                '</ul>'
+        },
+        mitigationLayer: {
+            title: 'Mitigation — a diagnostic layer',
+            body:
+                '<p>A <strong>mitigation</strong> is a diagnostic that sits <em>in the failure net</em>: failures of other modes are routed into it, and it removes the fraction it covers. It is not a leaf cause — it is a filter on the rate passing through it.</p>' +
+                '<p>Wire the failures it addresses into the mitigation\'s failure mode (cause → mitigation), then set the mitigation\'s <strong>diagnostic coverage</strong> DC<sub>M</sub>. The residual leaving it is:</p>' +
+                '<p class="dlg-formula"><code>residual = incoming × (1 − DC<sub>M</sub>) + own</code></p>' +
+                '<p>The mitigation\'s <strong>own</strong> failure rate (a diagnostic can itself fail) still counts — it is <em>not</em> reduced by DC<sub>M</sub>, because a mitigation does not diagnose itself. If the mechanism genuinely also checks its own integrity, tick <em>“coverage includes self-diagnostic”</em> and the coverage then applies to its own rate as well:</p>' +
+                '<p class="dlg-formula"><code>residual = (incoming + own) × (1 − DC<sub>M</sub>)</code></p>' +
+                '<p>A mitigation can be a <strong>requirement</strong> you author (a diagnostic + reaction) or a dedicated <strong>hardware</strong> block. Either way it is a low-level hardware element with its own λ.</p>'
+        },
+        selfDiagnostic: {
+            title: 'Coverage includes self-diagnostic',
+            body:
+                '<p>By default a mitigation reduces the rate <em>flowing through</em> it but not its <em>own</em> failure rate — a watchdog catches the faults it monitors, yet a broken watchdog is itself undetected. So the mitigation\'s own λ is added in full: <code>incoming × (1 − DC) + own</code>.</p>' +
+                '<p>Tick this when the mechanism <strong>also</strong> verifies its own integrity (a built-in self-test on the monitor, a heartbeat the monitor must keep emitting). The coverage then applies to its own rate too: <code>(incoming + own) × (1 − DC)</code>.</p>'
         },
         dangerousFraction: {
             title: 'Dangerous fraction',
@@ -367,23 +499,25 @@ const CONFIG = {
         hft: {
             title: 'Hardware fault tolerance (HFT)',
             body:
-                '<p><strong>HFT N</strong> means <strong>N + 1</strong> independent dangerous faults are needed before the safety function is lost — i.e. the element can tolerate N faults. It is the redundancy of the element\'s architecture, not a rate.</p>' +
+                '<p><strong>HFT N</strong> means <strong>N + 1</strong> independent dangerous faults are needed before the safety function is lost — i.e. the element tolerates N faults. In this tool it is <strong>computed from the architecture, never entered</strong>.</p>' +
+                '<p>Redundancy is an <strong>AND</strong> convergence in the failure net — the higher failure occurs only if <em>all</em> its causes fail, so losing one leaves the others holding the function. It counts as hardware fault tolerance only when the channels are genuinely <strong>independent</strong>: on <em>distinct</em> elements and with <em>no shared upstream cause</em> (freedom from interference). HFT is the number of such independent channels minus one, capped at 2.</p>' +
                 '<ul>' +
-                '<li><strong>HFT 0</strong> — a single, non-redundant channel: one fault can defeat it (the default).</li>' +
-                '<li><strong>HFT 1</strong> — 1-out-of-2 redundancy (two independent channels; one can fail safely).</li>' +
-                '<li><strong>HFT 2</strong> — triple redundancy (e.g. 2-out-of-3 voting).</li>' +
+                '<li><strong>HFT 0</strong> — a single channel, an OR convergence, or two modes in one element: one fault can defeat it (the default).</li>' +
+                '<li><strong>HFT 1</strong> — two independent channels AND-converging (1oo2: one can fail safely).</li>' +
+                '<li><strong>HFT 2</strong> — three independent channels (e.g. 2oo3 voting).</li>' +
                 '</ul>' +
-                '<p>Under Route 1<sub>H</sub> a higher HFT lifts the SIL cap for a given SFF, so adding redundancy can buy back integrity that the safe-failure fraction alone cannot. For a <strong>subsystem</strong>, use the redundancy of its internal architecture (from its safety manual). Only independent redundancy counts — shared causes (one supply, one clock) do not raise HFT.</p>'
+                '<p>Under Route 1<sub>H</sub> a higher HFT lifts the SIL cap for a given SFF, so independent redundancy can buy back integrity the safe-failure fraction alone cannot. Adding diagnostic coverage changes SFF/SPFM but <strong>never</strong> HFT — only an independent redundant element does. Shared causes (one supply, one clock) collapse the channels and yield HFT 0.</p>'
         },
         subsystemClaim: {
-            title: 'Subsystem — supplier safety claim',
+            title: 'Safety capability — declared SIL / ASIL',
             body:
-                '<p>For a black-box <strong>subsystem</strong> you often hold only the supplier\'s safety claim, not its internal failure modes. Without modes the computed SFF is 0, which would force a Type B element to "not allowed". These optional fields let you enter the claim the supplier has <em>already</em> discharged, so the element earns the integrity it was certified for. Both are recorded as <strong>assumptions to validate</strong> against the supplier\'s safety manual / certificate.</p>' +
+                '<p>The declared integrity of an element. Selecting a capability <strong>pre-fills</strong> the worst-case hardware numbers the standard permits for that band (its λ and SFF) into the empty fields below — replace them with your datasheet values where you have them; entered data is never overwritten.</p>' +
+                '<p>The declared capability is the element\'s <strong>systematic-capability ceiling</strong>. Entered failure data drives the computed band, and the declaration can only pull it <em>down</em>, never lift it: <strong>an ASIL-B controller cannot self-diagnose its way to ASIL D.</strong> Raising the band requires an independent, redundant element — not more coverage. The cap applies in its own lens only (a SIL claim caps the SIL band; an ASIL claim the ASIL band).</p>' +
                 '<ul>' +
-                '<li><strong>Claimed SFF (%)</strong> — the supplier\'s stated safe-failure fraction. It feeds the Route 1<sub>H</sub> table with this element\'s Type and HFT (IEC 61508 lens), exactly as a computed SFF would, instead of the 0 you would otherwise get.</li>' +
-                '<li><strong>Claimed capability (SIL / ASIL)</strong> — the integrity the supplier certifies the subsystem to (e.g. "SIL 2 capable", "ASIL B ready"). Used directly as the element\'s achieved band under the matching lens (the supplier already did Route 1<sub>H</sub> / the ISO metrics). It is still never reported above what an entered residual rate supports.</li>' +
+                '<li><strong>Declared capability (SIL / ASIL)</strong> — for a low-level hardware element this is the headline, refined by the hardware details below; for a subsystem / system it is optional — leave it blank to compute the integrity from the lower-level elements that realise it. A declared element with no failure data yet is banded at its declaration (characterised at the band\'s worst case for roll-up).</li>' +
+                '<li><strong>Claimed SFF (%)</strong> — a supplier\'s stated safe-failure fraction, if you have one. It overrides the SFF computed from the failure modes and feeds the IEC 61508 Route 1<sub>H</sub> constraint with this element\'s Type and its computed HFT.</li>' +
                 '</ul>' +
-                '<p>If both are set, the more limiting one governs. A claimed SFF applies under the IEC lens; a claimed capability applies under whichever lens (SIL ⇒ IEC, ASIL ⇒ ISO) it is stated in. Leave both blank to compute the element from its own failure modes.</p>'
+                '<p>Both are recorded as <strong>assumptions to validate</strong> against the supplier\'s safety manual / certificate.</p>'
         },
         datasheet: {
             title: 'From a datasheet FMEDA (λ_S / λ_DD / λ_DU)',

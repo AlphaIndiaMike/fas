@@ -710,7 +710,7 @@ const controls = (() => {
             const cap     = t.route1hSil;                       // null if no element SFF
             const claim   = (cap == null) ? bandSil : fmt.silMin(bandSil, cap);
             const capRow  = (cap == null)
-                ? `<div class="res-m-note">No element carries a computed SFF, so the Route 1<sub>H</sub> architectural cap is not evaluated. Add failure modes to your elements (and set each element's Type A/B and HFT) to apply it.</div>`
+                ? `<div class="res-m-note">No element carries a computed SFF yet, so the Route 1<sub>H</sub> architectural cap is not evaluated. Add failure modes to your elements to compute it.</div>`
                 : `${row('Architectural cap (Route 1<sub>H</sub>)',
                         '<strong>' + fmt.escHtml(cap) + '</strong>')}` +
                   `<div class="res-m-tgt">limiting element: ${fmt.escHtml(t.route1hLimiter || '—')}</div>`;
@@ -722,7 +722,7 @@ const controls = (() => {
                     ${row('Integrity from PFH band', fmt.escHtml(bandSil))}
                     ${capRow}
                     ${row('<strong>Claimable SIL</strong>', '<strong>' + fmt.escHtml(claim) + '</strong>')}
-                    <div class="res-m-note">Route 1<sub>H</sub> (IEC 61508-2): each element's max SIL is capped by its SFF and hardware fault tolerance (HFT), per the Type A / Type B table. The claimable SIL is the lower of the PFH-band SIL and the architectural cap${limited ? ' — here the architecture limits it below the rate-based band' : ''}. Set each element's Type and HFT in its editor.</div>
+                    <div class="res-m-note">Route 1<sub>H</sub> (IEC 61508-2): each element's max SIL is capped by its SFF and hardware fault tolerance (HFT), per the Type A / Type B table. The claimable SIL is the lower of the PFH-band SIL and the architectural cap${limited ? ' — here the architecture limits it below the rate-based band' : ''}.</div>
                 </div>`;
         }
 
@@ -736,19 +736,42 @@ const controls = (() => {
                         row('λ<sub>MPF,latent</sub>', fit(t.lambdaMPFlatent)) : ''}
                 <div class="res-m-note">Computed over leaf failure modes. λ<sub>S</sub> derives from the dangerous fraction (λ<sub>SD</sub> = 0; all λ<sub>S</sub> sits in λ<sub>SU</sub>). SFF = (Σλ<sub>S</sub> + Σλ<sub>DD</sub>) / Σλ<sub>Total</sub>.</div>
             </div>`;
-        if (metrics.elements && metrics.elements.length > 1) {
+        if (metrics.elements && metrics.elements.length) {
+            h += `<div class="res-section">Per-element metrics</div>`;
+            const isoTgt = { 'ASIL D': { spfm: 0.99, lfm: 0.90, pmhf: 1e-8 },
+                             'ASIL C': { spfm: 0.97, lfm: 0.80, pmhf: 1e-7 },
+                             'ASIL B': { spfm: 0.90, lfm: 0.60, pmhf: 1e-7 } };
             metrics.elements.slice()
                 .sort((a, b) => (b.lambdaTotal || 0) - (a.lambdaTotal || 0))
                 .forEach(e => {
                     const elBand = iso ? e.achievedAsil : e.achievedSil;
+                    const pmhf = (e.lambdaSPF + e.lambdaRF) * 1e-9;
+                    const mh   = fmt.mtbfHoursFromFit(e.lambdaTotal);
+                    const mtbf = (mh == null) ? '—'
+                        : mh.toExponential(2) + ' h (' + (mh / 8760).toExponential(2) + ' yr)';
                     const tail = iso
-                        ? `SPFM ${pct(e.spfm)} · LFM ${pct(e.lfm)}`
-                        : `SFF ${pct(e.sff)} · Type ${fmt.escHtml(e.elementType || 'B')} · HFT ${e.hft || 0} · Route 1ₕ ${fmt.escHtml(e.route1hSil || '—')}`;
+                        ? `PMHF ${fmt.perHourStr(pmhf)} · SPFM ${pct(e.spfm)} · LFM ${pct(e.lfm)}`
+                        : `PFH ${fmt.perHourStr(e.lambdaDU * 1e-9)} · SFF ${pct(e.sff)} · Type ${fmt.escHtml(e.elementType || 'B')} · HFT ${e.hft || 0} · Route 1ₕ ${fmt.escHtml(e.route1hSil || '—')}`;
+                    // Binding-constraint note: the band follows the RATE; surface
+                    // where the supporting metrics fall short (evidence, not a
+                    // downgrade) so the user knows what to improve.
+                    let note = '';
+                    const T = isoTgt[elBand];
+                    if (iso && T) {
+                        const miss = [];
+                        if (e.spfm != null && e.spfm < T.spfm) miss.push(`SPFM ${pct(e.spfm)} &lt; ${Math.round(T.spfm * 100)}% (raise DC₁ / lower the dangerous fraction)`);
+                        if (e.lfm  != null && e.lfm  < T.lfm)  miss.push(`LFM ${pct(e.lfm)} &lt; ${Math.round(T.lfm * 100)}% (set the latent-fault coverage DC₂)`);
+                        if (miss.length) note = `<div class="res-m-note">Evidence below the ISO target for ${fmt.escHtml(elBand)}: ${miss.join('; ')}. The band follows the dangerous rate; this is shown as evidence, not a downgrade.</div>`;
+                    } else if (!iso && e.route1hSil && e.route1hSil !== '—' && elBand && elBand !== '—'
+                               && fmt.silRank(e.route1hSil) < fmt.silRank(elBand)) {
+                        note = `<div class="res-m-note">Route 1ₕ architectural cap is ${fmt.escHtml(e.route1hSil)} (SFF ${pct(e.sff)}), below the rate-driven ${fmt.escHtml(elBand)}. Raise SFF (DC₁) or add fault tolerance (HFT) to back the claim architecturally.</div>`;
+                    }
                     h += `<div class="res-card res-metrics-el">
                         <div class="res-fn">${fmt.escHtml(e.name)}
                             <span class="res-id">${fmt.escHtml(e.id || '')}</span>
                             ${e.level ? `<span class="res-lvl">${fmt.escHtml(e.level)}</span>` : ''}</div>
-                        <div class="res-pfh">λ ${fit(e.lambdaTotal)} FIT · ${tail}${elBand && elBand !== '—' ? ' → <strong>' + fmt.escHtml(elBand) + '</strong>' : ''}</div>
+                        <div class="res-pfh">λ ${fit(e.lambdaTotal)} FIT · MTBF ${mtbf} · ${tail}${elBand && elBand !== '—' ? ' → <strong>' + fmt.escHtml(elBand) + '</strong>' : ''}</div>
+                        ${note}
                     </div>`;
                 });
         }
@@ -764,14 +787,64 @@ const controls = (() => {
         _lastFmedaRollup = rollup || null;   // remember for view-mode re-render
         const el = document.getElementById('ctrlResidual');
         if (!el) return;
-        if (!rollup || !rollup.functions.length) {
-            el.innerHTML = `<div class="ctrl-empty">No failure modes defined.</div>`;
-            return;
-        }
+        const _proj  = (cb.getProject && cb.getProject()) ? cb.getProject() : null;
         const simple = (_viewMode === 'simplified');
         const iso    = (_standard !== 'IEC61508');   // ISO 26262 is the default lens
         const toPfh  = fit => fit * 1e-9;
         const fitStr = v => fmt.fitStr(v);
+        if (!rollup || !rollup.functions.length) {
+            // No functions / failure modes yet — but element-level DECLARATIONS
+            // (a claimed SIL/ASIL) and the validation Checks still apply, so show
+            // those instead of a bare "nothing here" message. This is also why
+            // the lens-mismatch info now appears as soon as you declare a band,
+            // without needing functions or a Recalculate. (Previously this path
+            // returned early and hid all of it.)
+            let h = `<div class="ctrl-empty">No failure modes with a rate yet. Element bands compute once an element has a base failure rate λ (hardware) or incoming failures wired (systematic); declarations and checks still apply:</div>`;
+            if (_proj) {
+                const rows = _proj.fmedaElementsForDisplay(iso);
+                if (rows.length) {
+                    const other  = _proj.fmedaElementBandState(!iso);
+                    const thisL  = iso ? 'ISO 26262 (ASIL)' : 'IEC 61508 (SIL)';
+                    const otherL = iso ? 'IEC 61508 (SIL)'  : 'ISO 26262 (ASIL)';
+                    const archLbl = a => a ? `<span class="res-lvl">${fmt.escHtml(a)}</span>` : '';
+                    h += `<div class="res-section">Architecture elements</div>`;
+                    rows.forEach(r => {
+                        const o = other[r.id];
+                        const lensNote = (!r.bandComputed && o && o.computed)
+                            ? `<div class="res-m-note res-m-note--lens">ℹ Declares <strong>${fmt.escHtml(o.band)}</strong>, an ${otherL} figure that the active ${thisL} lens does not show. Switch the results lens to ${otherL} to see it.</div>`
+                            : '';
+                        let bandTxt, errNote = '', declNote = '';
+                        if (r.bandComputed) {
+                            bandTxt = `<span class="res-band">${fmt.escHtml(r.band)}</span>`;
+                            if (r.computedBand && r.declaredBand) {
+                                declNote = r.mismatch
+                                    ? `<div class="res-m-note res-m-note--claim">Supplier declares <strong>${fmt.escHtml(r.declaredBand)}</strong> — differs from the computed band; reconcile the claim with the evidence.</div>`
+                                    : `<div class="res-m-note res-m-note--claim">Supplier declares <strong>${fmt.escHtml(r.declaredBand)}</strong> (matches the computed band).</div>`;
+                            }
+                        } else if (r.bandReason === 'error') {
+                            bandTxt = `<span class="res-raw">not characterised</span>`;
+                            const need = r.needs === 'lambda'
+                                ? 'enter a base failure rate λ on this hardware element'
+                                : (r.needs === 'incoming'
+                                    ? 'wire the lower-level failures that feed this systematic element'
+                                    : 'add failure modes, or declare a supplier capability');
+                            errNote = `<div class="res-check res-check--error">Not characterised — ${need} (or declare a supplier SFF / capability).</div>`;
+                        } else {
+                            bandTxt = `<span class="res-raw">no band yet</span>`;
+                        }
+                        h += `<div class="res-card res-el-card${r.bandReason === 'error' ? ' res-el-card--error' : ''}">
+                                <div class="res-fn">${fmt.escHtml(r.name)} <span class="res-id">${fmt.escHtml(r.id)}</span>
+                                    ${r.level ? `<span class="res-lvl">${fmt.escHtml(r.level)}</span>` : ''}${archLbl(r.archType)}</div>
+                                <div class="res-levels">${bandTxt}</div>
+                                ${errNote}${declNote}${lensNote}
+                              </div>`;
+                    });
+                }
+            }
+            h += _checksHtml(_proj, iso);
+            el.innerHTML = h;
+            return;
+        }
 
         // Single chip for the ACTIVE standard only. The two scales are never
         // shown as a pair, so "SIL 4 / ASIL D" can never appear together and be
@@ -803,7 +876,6 @@ const controls = (() => {
         };
 
         let html = '';
-        const _proj = (cb.getProject && cb.getProject()) ? cb.getProject() : null;
 
         // ── 0. FMEDA metrics: λ breakdown, SFF, SPFM/LFM ─────────────
         if (rollup.metrics && rollup.metrics.total &&
@@ -824,12 +896,18 @@ const controls = (() => {
             const lbl = simple ? (CONFIG.simpleLabels.sil[bandStr] || bandStr) : bandStr;
             return `<span class="ctrl-chip ctrl-chip-sil ${_silClass(bandStr)}">${fmt.escHtml(lbl)}</span>`;
         };
-        // Why an element shows no SIL/ASIL — it carries the integrity you
-        // DECLARE for it, not one inferred from its functions.
-        const bandReasonNote = (reason) => {
-            if (reason === 'empty')
-                return 'No failure modes yet — add functions and failure modes below.';
-            return 'No integrity declared — open the element and set a claimed SFF or a claimed SIL/ASIL capability to assign its band. (Its functions and failure modes are computed below.)';
+        // Why an element shows no band — it is not yet characterised (no rate
+        // and no claim), or its claim resolves only in the other lens.
+        const bandReasonNote = (elr) => {
+            if (elr.bandReason === 'error') {
+                const need = elr.needs === 'lambda'
+                    ? 'enter its base failure rate λ (hardware element)'
+                    : (elr.needs === 'incoming'
+                        ? 'wire the lower-level failures that feed it (systematic element)'
+                        : 'add failure modes, or declare a supplier capability');
+                return 'Not characterised — ' + need + ', or declare a supplier SFF / capability.';
+            }
+            return 'No band in this lens — its declared capability resolves only under the other standard.';
         };
         // Per-element metrics for the cap explanation — why an element's band
         // can sit below the band its rate alone would reach. Both lenses get a
@@ -872,14 +950,24 @@ const controls = (() => {
             return `<div class="res-m-note">Limited by Route 1<sub>H</sub> (Type ${fmt.escHtml(m.elementType || 'B')}, HFT ${m.hft || 0}, SFF ${m.sff == null ? '—' : Math.round(m.sff * 100) + '%'}): the architecture ${capTxt}, though the rate alone would reach ${fmt.escHtml(rateSil)}. Raise SFF (diagnostic coverage DC₁ or safe-failure share), set Type A if it is a simple element, or add hardware fault tolerance (HFT).</div>`;
         };
 
-        // A claimed band is a supplier assumption — flag it for traceability.
+        // A declared supplier band is an assumption — flag it for traceability,
+        // whether it is the headline (claim-only element) or shown alongside a
+        // computed band (computed+claimed). A mismatch is called out explicitly.
         const claimNote = (elr) => {
-            if (elr.bandReason !== 'claimed' || !_proj) return '';
+            if (!_proj) return '';
+            if (elr.bandReason !== 'claimed' && elr.bandReason !== 'computed+claimed') return '';
             const el = _proj.groupById ? _proj.groupById(elr.id) : null;
             if (!el) return '';
             const bits = [];
             if (el.claimedCapability) bits.push(`capability ${fmt.escHtml(el.claimedCapability)}`);
             if (el.claimedSff != null) bits.push(`SFF ${Math.round(el.claimedSff * 100)}%`);
+            if (elr.bandReason === 'computed+claimed') {
+                if (elr.cappedByCapability)
+                    return `<div class="res-m-note res-m-note--claim">Declared <strong>${fmt.escHtml(elr.declaredBand)}</strong> (${bits.join(', ')}) — its hardware metrics alone would reach ${fmt.escHtml(elr.rawComputedBand || elr.computedBand)}, but the declared systematic capability is the ceiling, so the band is held at ${fmt.escHtml(elr.band)}. Only independent redundancy can raise it.</div>`;
+                return elr.mismatch
+                    ? `<div class="res-m-note res-m-note--claim">Supplier <strong>declares ${fmt.escHtml(elr.declaredBand)}</strong> (${bits.join(', ')}) — higher than the evidence supports; reconcile the claim with the FMEDA.</div>`
+                    : `<div class="res-m-note res-m-note--claim">Supplier <strong>declares ${fmt.escHtml(elr.declaredBand)}</strong> (${bits.join(', ')}) — consistent with the computed band.</div>`;
+            }
             return `<div class="res-m-note res-m-note--claim">Band from <strong>supplier claim</strong> (${bits.join(', ')}) — an assumption to validate against the subsystem's safety manual / certificate.</div>`;
         };
 
@@ -887,23 +975,34 @@ const controls = (() => {
         const elemRows = _proj
             ? _proj.fmedaElementsForDisplay(iso)
             : (rollup.elements || []).slice().sort((a, b) => a.integrityFit - b.integrityFit)
-                .map(e => Object.assign({}, e, { band: null, bandComputed: false, bandReason: 'empty' }));
+                .map(e => Object.assign({}, e, { band: null, bandComputed: false, bandReason: 'error' }));
         if (elemRows.length) {
             html += `<div class="res-section">Architecture elements</div>`;
-            html += `<div class="res-m-note">An element's SIL/ASIL is the integrity you <strong>declare</strong> for it — a claimed SFF (read through Route 1<sub>H</sub> with its Type/HFT) or a claimed SIL/ASIL capability. It is not inferred from the functions; the functions and failure modes below carry the computed rates. Undeclared elements show no band.</div>`;
+            html += `<div class="res-m-note">An element's band is <strong>computed</strong> from its numbers — a hardware element from its own failure modes, a systematic element from what the failure net feeds into it. A supplier <strong>claim</strong> is shown alongside. An element with neither is flagged as not characterised.</div>`;
+            const _otherBands = _proj ? _proj.fmedaElementBandState(!iso) : {};
+            const _thisLensName  = iso ? 'ISO 26262 (ASIL)' : 'IEC 61508 (SIL)';
+            const _otherLensName = iso ? 'IEC 61508 (SIL)'  : 'ISO 26262 (ASIL)';
+            const _archLbl = a => a ? `<span class="res-lvl">${fmt.escHtml(a)}</span>` : '';
             elemRows.forEach(elr => {
                 const chip = elr.bandComputed ? bandChipStr(elr.band) : '';
                 const levels = chip
                     ? chip
-                    : `<span class="res-raw">${fmt.escHtml(bandReasonNote(elr.bandReason))}</span>`;
+                    : `<span class="res-raw">${fmt.escHtml(bandReasonNote(elr))}</span>`;
+                const _other = _otherBands[elr.id];
+                const _lensNote = (!elr.bandComputed && _other && _other.computed)
+                    ? `<div class="res-m-note res-m-note--lens">ℹ Declares <strong>${fmt.escHtml(_other.band)}</strong>, an ${_otherLensName} figure that the active ${_thisLensName} lens does not show. Switch the results lens to ${_otherLensName} to see it.</div>`
+                    : '';
+                const isErr = (elr.bandReason === 'error');
                 html += `
-                    <div class="res-card res-el-card">
+                    <div class="res-card res-el-card${isErr ? ' res-el-card--error' : ''}">
                         <div class="res-fn">${fmt.escHtml(elr.name)}
                             <span class="res-id">${fmt.escHtml(elr.id)}</span>
-                            ${elr.level ? `<span class="res-lvl">${fmt.escHtml(elr.level)}</span>` : ''}</div>
+                            ${elr.level ? `<span class="res-lvl">${fmt.escHtml(elr.level)}</span>` : ''}${_archLbl(elr.archType)}</div>
                         <div class="res-levels">${levels}</div>
                         <div class="res-pfh">total residual ${fitStr(elr.residualFit)}</div>
+                        ${capNote(elr)}
                         ${claimNote(elr)}
+                        ${_lensNote}
                     </div>`;
             });
         }
@@ -915,15 +1014,23 @@ const controls = (() => {
         rollup.functions.forEach(f => {
             const pfh = toPfh(f.residualFit);
             const fmRec = _fnMet[f.id];
-            const fnBand = fmRec ? (iso ? fmRec.achievedAsil : fmRec.achievedSil) : null;
+            // A derived (mid/top) function shows a band only once a failure-net
+            // connection feeds it — otherwise its 0-FIT residual would read as a
+            // default ASIL D / SIL 4.
+            const fnFed = _proj ? _proj.fmedaFunctionFed(f.id) : true;
+            const fnBand = (fnFed && fmRec) ? (iso ? fmRec.achievedAsil : fmRec.achievedSil) : null;
+            const levelsHtml = fnFed
+                ? bandChips(pfh, fnBand)
+                : `<span class="res-raw">no band yet — connect this derived function in the failure net</span>`;
+            const remarkHtml = fnFed ? qmRemark(pfh, fnBand) : '';
             const reduced = f.rawFit > 0
                 ? Math.round((1 - f.residualFit / f.rawFit) * 100) : 0;
             let body;
             if (simple) {
                 body = `
                     <div class="res-nums">achieved ${fmt.pfhDualStr(pfh)}</div>
-                    <div class="res-levels">${bandChips(pfh, fnBand)}</div>
-                    ${qmRemark(pfh, fnBand)}`;
+                    <div class="res-levels">${levelsHtml}</div>
+                    ${remarkHtml}`;
             } else {
                 // Integrity-first, then the rate, then the reduction. When
                 // nothing was reduced we say so plainly instead of the
@@ -932,21 +1039,29 @@ const controls = (() => {
                     ? `<span class="res-cut">−${reduced}% vs ${fitStr(f.rawFit)} raw</span>`
                     : `<span class="res-raw">No diagnostic credit (raw = residual)</span>`;
                 body = `
-                    <div class="res-levels">${bandChips(pfh, fnBand)}</div>
+                    <div class="res-levels">${levelsHtml}</div>
                     <div class="res-nums">residual <strong>${fitStr(f.residualFit)}</strong>
                         &nbsp;·&nbsp; ${fmt.pfhDualStr(pfh)}</div>
                     <div class="res-pfh">${reductionLine}</div>
-                    ${qmRemark(pfh, fnBand)}`;
+                    ${remarkHtml}`;
             }
             const allUnhandled = f.handledCount === 0 && f.total > 0;
             const dInfo = f.derivedCount > 0
                 ? ` · ${f.derivedCount} derived` : '';
+            // When the function's own metrics would reach a higher band than the
+            // hardware element that implements it, the band is capped to the
+            // element — make that explicit (a function is never better than its
+            // element).
+            const capNote = (fnFed && fmRec && fmRec.cappedByElement && fnBand)
+                ? `<div class="res-m-note">${fnBand} — limited by element ${fmt.escHtml(f.elementName)} (a function cannot exceed the hardware that realizes it)</div>`
+                : '';
             html += `
                 <div class="res-card">
                     <div class="res-fn">${fmt.escHtml(f.name)}
                         <span class="res-id">${fmt.escHtml(f.id)}</span>
                         <span class="res-el">(${fmt.escHtml(f.elementName)})</span></div>
                     ${body}
+                    ${capNote}
                     <div class="res-handled ${allUnhandled ? 'res-handled-none' : ''}">${f.handledCount}/${f.total} failure modes handled${dInfo}</div>
                 </div>`;
         });
@@ -981,15 +1096,24 @@ const controls = (() => {
         // is testable and the demos can be asserted error-free). Shown LAST, at
         // the end of the panel, so the warnings follow the numbers instead of
         // pushing them down.
-        const checks = _proj ? _proj.fmedaValidate() : [];
-        if (checks.length) {
-            html += `<div class="res-section">Checks</div>`;
-            checks.forEach(c => {
-                html += `<div class="res-check res-check--${c.level}">${c.level === 'error' ? '⛔' : '⚠'} ${fmt.escHtml(c.msg)}</div>`;
-            });
-        }
+        html += _checksHtml(_proj, iso);
 
         el.innerHTML = html;
+    }
+
+    /* The validation Checks block (errors / warnings / info), as HTML. Pulled
+       out so it can render in BOTH the full panel and the no-failure-modes panel
+       — element-level declarations and lens-mismatch info still apply when there
+       are no functions yet, and they update live on every model edit. */
+    function _checksHtml(proj, iso) {
+        const checks = proj ? proj.fmedaValidate(iso) : [];
+        if (!checks.length) return '';
+        let h = `<div class="res-section">Checks</div>`;
+        checks.forEach(c => {
+            const icon = c.level === 'error' ? '⛔' : c.level === 'info' ? 'ℹ' : '⚠';
+            h += `<div class="res-check res-check--${c.level}">${icon} ${fmt.escHtml(c.msg)}</div>`;
+        });
+        return h;
     }
 
     return {

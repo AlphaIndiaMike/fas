@@ -159,9 +159,13 @@ const fmedaCanvas = (() => {
                 elOrigin[el.id] = (el.x || el.y)
                     ? { x: el.x - COL_W / 2, yTop: el.y - h / 2 }
                     : { x: colX, yTop: yCursor };
-                // Element headline: ONLY its achieved integrity band, in the
-                // active lens (leaf → aggregated metrics; mid/top → subtree
-                // aggregate). Empty elements are absent from the map → no band.
+                // Element headline: ONLY its DECLARED achieved integrity band
+                // (claimed SIL/ASIL, or claimed SFF read via Route 1ₕ), in the
+                // active lens. This is a declaration, not a rate-based figure, so
+                // it shows whenever declared — connections do not gate it (that
+                // gating applies to the computed FUNCTION bands below). An
+                // element that is not yet characterised (no numbers AND no
+                // claim) is absent from the map → no band shown.
                 const elBand = elBands[el.id];
                 const elMetric = (elBand && elBand !== '—') ? elBand : '';
                 els.push({
@@ -214,12 +218,22 @@ const fmedaCanvas = (() => {
                 // basis as the element/system, so a function never disagrees
                 // with the top-level verdict on a rate-only technicality. A
                 // function with no failure modes has no roll-up entry → no line.
+                // A DERIVED (mid/top) function shows a band only once a
+                // failure-net connection feeds it; until then we show its FIT
+                // (if any) but NOT a band, so an unconnected node never reads as
+                // a default ASIL D / SIL 4.
                 const fr = fnRoll[fn.id];
                 const fmm = fnMet[fn.id];
-                const fnBand = fmm ? (iso ? fmm.achievedAsil : fmm.achievedSil)
-                                   : (fr ? bandFor(fr.residualFit * 1e-9) : '');
+                // Rate-driven, element-capped band from the metrics. A function
+                // with no rate (0 FIT) is not characterised → no band token on
+                // the drawing (never the old "0 FIT · SIL 4 / ASIL D").
+                const fnBandRaw = fmm
+                    ? (iso ? fmm.achievedAsil : fmm.achievedSil)
+                    : ((fr && fr.residualFit > 0) ? bandFor(fr.residualFit * 1e-9) : '');
+                const fnBand = (fnBandRaw && fnBandRaw !== '—') ? fnBandRaw : '';
                 const fnMetric = fr
-                    ? fmt.fitStr(fr.residualFit) + ' · ' + fnBand
+                    ? (fnBand ? fmt.fitStr(fr.residualFit) + ' · ' + fnBand
+                              : fmt.fitStr(fr.residualFit))
                     : '';
                 els.push({
                     group: 'nodes',
@@ -262,11 +276,13 @@ const fmedaCanvas = (() => {
             }
             fms.forEach(e => {
                 const derived = project.fmedaIsDerived(e.id);
-                // Handled: a leaf with DC+mitigation, OR a derived mode that
-                // its upstream mitigations actually reduce.
+                // Handled: a leaf with diagnostic coverage (DC₁ > 0), OR a
+                // derived mode that its upstream mitigations actually reduce.
+                // (Every FMEDA mode is coverage-mode now, so probMode alone says
+                // nothing — the diagnostic coverage value is what counts.)
                 const handled = derived
                     ? project.fmedaComputedDC(e.id) > 0
-                    : (project.fmedaIsHandled(e) || e.probMode === 'coverage');
+                    : (project.fmedaIsHandled(e) || (+e.diagnosticCoverage || 0) > 0);
                 const dc = derived ? project.fmedaComputedDC(e.id)
                                    : (+e.diagnosticCoverage || 0);
                 // Sub-label: SR id for a handled leaf (traceability), or the

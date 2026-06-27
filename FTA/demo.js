@@ -199,80 +199,96 @@ const demo = (function () {
         p.setMode('FMEDA');
         p.missionTime = 10000;               // h — reference automotive mission time
 
-        // ── Low-level elements (the leaves where rates are entered) ──
-        const mcu = p.addGroup({ name: 'MCU', kind: 'element', level: 'low' });
-        const mcuFn = p.addGroup({ name: 'Execute control loop', kind: 'function', parentId: mcu.id });
+        // ── Low-level (hardware) elements — λ lives on the ELEMENT now (its
+        //    datasheet FIT); the failure modes inherit it and apportion by FMD.
+        //    Every leaf's λ_D / λ_S is unchanged from the pre-layered model. ──
+        //    MCU = ram (λ_D 200, λ_S 1800) + alu (λ_D 40, λ_S 160) → λ 2200.
+        const mcu = p.addGroup({ name: 'MCU', kind: 'element', level: 'low', lambdaBase: 2200 });
+        const mcuFn = p.addGroup({ name: 'Execute control loop', kind: 'function', parentId: mcu.id, fnType: 'SW' });
         const ram = p.addEvent({ name: 'RAM bit flip', kind: 'basic', groupId: mcuFn.id });
         p.updateEvent(ram.id, {
-            probMode: 'coverage', failureRateRaw: 200, diagnosticCoverage: 0.99,
-            diagnosticCoverageLatent: 0.9, failureRateSafe: 1800,
+            fmd: 2000 / 2200, dangerousFraction: 0.1, diagnosticCoverage: 0.99,
+            diagnosticCoverageLatent: 0.9,
             mitigation: 'ECC on RAM; uncorrectable error forces the safe state within 10 ms.',
             diagnosticEvidence: 'ISO 26262-5:2018 Annex D, Table D.4 (EDC/ECC).'
         });
         const alu = p.addEvent({ name: 'ALU stuck-at fault', kind: 'basic', groupId: mcuFn.id });
         p.updateEvent(alu.id, {
-            probMode: 'coverage', failureRateRaw: 40, diagnosticCoverage: 0.97,
-            diagnosticCoverageLatent: 0.85, failureRateSafe: 160,
+            fmd: 200 / 2200, dangerousFraction: 0.2, diagnosticCoverage: 0.97,
+            diagnosticCoverageLatent: 0.85,
             mitigation: 'Lockstep core comparison; a mismatch latches the safe state.',
             diagnosticEvidence: 'ISO 26262-5:2018 Annex D, Table D.4 (redundant lockstep).'
         });
 
+        //    Power Supply = ov (λ_D 50, DC 0.95) + loss (λ_D 80, DC 0.99) → λ 130.
+        //    Single regulated rail (one element, two modes) — no structural
+        //    redundancy, so its computed HFT is 0. Redundancy in this model lives
+        //    in the sensor pair below, which AND-converges on the ECU.
         const pwr = p.addGroup({ name: 'Power Supply', kind: 'element', level: 'low',
-                                 elementType: 'B', hft: 1 });   // redundant LDO → HFT 1
-        const pwrFn = p.addGroup({ name: 'Provide regulated rail', kind: 'function', parentId: pwr.id });
+                                 elementType: 'B', lambdaBase: 130 });
+        const pwrFn = p.addGroup({ name: 'Provide regulated rail', kind: 'function', parentId: pwr.id, fnType: 'HW' });
         const ov = p.addEvent({ name: 'Overvoltage', kind: 'basic', groupId: pwrFn.id });
         p.updateEvent(ov.id, {
-            probMode: 'direct', directUnit: 'PFD', probability: 0.0005,   // 0.05 %
-            diagnosticCoverage: 0.95,
+            fmd: 50 / 130, dangerousFraction: 1, diagnosticCoverage: 0.95,
             mitigation: 'Independent over-voltage comparator disables the rail and signals fault.'
         });
         const loss = p.addEvent({ name: 'Total loss of supply', kind: 'basic', groupId: pwrFn.id });
         p.updateEvent(loss.id, {
-            probMode: 'rate', failureRate: 80, diagnosticCoverage: 0.99,
-            diagnosticCoverageLatent: 0.7, failureRateSafe: 720,
+            fmd: 80 / 130, dangerousFraction: 1, diagnosticCoverage: 0.99,
+            diagnosticCoverageLatent: 0.7,
             mitigation: 'Redundant LDO with cross-monitoring; loss is detected and annunciated.'
         });
 
-        const senA = p.addGroup({ name: 'Pedal Sensor A', kind: 'element', level: 'low' });
-        const senAFn = p.addGroup({ name: 'Sense pedal (A)', kind: 'function', parentId: senA.id });
+        //    Pedal Sensor A = implA (λ_D 60, λ_S 540; DC 0.9) → λ 600.
+        const senA = p.addGroup({ name: 'Pedal Sensor A', kind: 'element', level: 'low', lambdaBase: 600 });
+        const senAFn = p.addGroup({ name: 'Sense pedal (A)', kind: 'function', parentId: senA.id, fnType: 'HW' });
         const implA = p.addEvent({ name: 'Implausible reading', kind: 'basic', groupId: senAFn.id });
         // Covered here (cf. the calibration model, where this same mode is the
-        // deliberately uncovered 50 % single-point fault that stays QM).
+        // deliberately uncovered single-point fault that stays QM).
         p.updateEvent(implA.id, {
-            probMode: 'coverage', failureRateRaw: 60, diagnosticCoverage: 0.9,
-            diagnosticCoverageLatent: 0.6, failureRateSafe: 540,
+            fmd: 1, dangerousFraction: 0.1, diagnosticCoverage: 0.9,
+            diagnosticCoverageLatent: 0.6,
             mitigation: 'Cross-check against redundant channel B; disagreement enters the safe state.'
         });
 
-        const senB = p.addGroup({ name: 'Pedal Sensor B', kind: 'element', level: 'low' });
-        const senBFn = p.addGroup({ name: 'Sense pedal (B)', kind: 'function', parentId: senB.id });
+        //    Pedal Sensor B = implB (λ_D 60, DC 0.9) → λ 60.
+        const senB = p.addGroup({ name: 'Pedal Sensor B', kind: 'element', level: 'low', lambdaBase: 60 });
+        const senBFn = p.addGroup({ name: 'Sense pedal (B)', kind: 'function', parentId: senB.id, fnType: 'HW' });
         const implB = p.addEvent({ name: 'Implausible reading', kind: 'basic', groupId: senBFn.id });
         p.updateEvent(implB.id, {
-            probMode: 'rate', failureRate: 60, diagnosticCoverage: 0.9,
+            fmd: 1, dangerousFraction: 1, diagnosticCoverage: 0.9,
             mitigation: 'Range and rate-of-change plausibility check on the channel.'
         });
 
         // ── Mid-level element (derived effects, computed bottom-up) ──
         const ecu = p.addGroup({ name: 'Brake ECU', kind: 'element', level: 'mid' });
-        const cmdFn = p.addGroup({ name: 'Form brake command', kind: 'function', parentId: ecu.id });
+        const cmdFn = p.addGroup({ name: 'Form brake command', kind: 'function', parentId: ecu.id, fnType: 'SYS' });
         const erroneous = p.addEvent({ name: 'Erroneous brake command', kind: 'basic', groupId: cmdFn.id });
         const mcuEffect = p.addEvent({ name: 'Controller fault propagates', kind: 'basic', groupId: cmdFn.id });
-        const availFn = p.addGroup({ name: 'Maintain command availability', kind: 'function', parentId: ecu.id });
+        const availFn = p.addGroup({ name: 'Maintain command availability', kind: 'function', parentId: ecu.id, fnType: 'SYS' });
         const noCmd = p.addEvent({ name: 'No brake command', kind: 'basic', groupId: availFn.id });
 
         // ── Top-level element (system effect) ──
         const sys = p.addGroup({ name: 'Brake-by-Wire System', kind: 'element', level: 'top' });
         p.updateGroup(sys.id, {
-            description: 'Worked PASS reference. Leaf metrics roll up to PMHF ≈ ' +
-                '1.85e-8 /h, SPFM ≈ 99.4 %, LFM ≈ 94.2 % → ASIL C under the ISO ' +
-                '26262 lens (the highest ASIL whose PMHF, SPFM and LFM are all met). ' +
-                'The verdict is the minimum across the three metrics: SPFM/LFM reach ' +
-                'ASIL D level, but PMHF does not clear D\u2019s 1e-8 /h target. ' +
-                'Under the IEC 61508 lens the PFH band is SIL 3, but the Route 1\u2095 ' +
-                'architectural cap is SIL 2 — limited by the single-channel Pedal ' +
-                'Sensor B (Type B, SFF 90 %, HFT 0) — so the claimable SIL is 2.'
+            description: 'Worked PASS reference (layered model): each hardware ' +
+                'element carries its datasheet λ; the failure modes inherit it ' +
+                'and apportion by FMD. Leaf metrics roll up to PMHF \u2248 ' +
+                '1.85e-8 /h, SPFM \u2248 99.4 %, LFM \u2248 94.2 % → ASIL C under ' +
+                'the ISO 26262 lens (the highest ASIL whose PMHF, SPFM and LFM ' +
+                'are all met). The verdict is the minimum across the three ' +
+                'metrics: SPFM/LFM reach ASIL D level, but PMHF does not clear ' +
+                'D\u2019s 1e-8 /h target. Under the IEC 61508 lens the PFH band ' +
+                'is SIL 3, but the Route 1\u2095 architectural cap is SIL 2 — set ' +
+                'by the single-channel elements (Pedal Sensor B and the Power ' +
+                'Supply, Type B / SFF \u2264 99 % / computed HFT 0). The hardware ' +
+                'fault tolerance is NOT entered by hand: it is read from the ' +
+                'architecture. The redundant pedal sensors (A and B, independent ' +
+                'elements) AND-converge on the ECU\u2019s brake command, so the ' +
+                'Brake ECU computes HFT 1 from that structure — the one place ' +
+                'redundancy lifts a subsystem clear of the single-channel cap.'
         });
-        const brakeFn = p.addGroup({ name: 'Deliver braking torque', kind: 'function', parentId: sys.id });
+        const brakeFn = p.addGroup({ name: 'Deliver braking torque', kind: 'function', parentId: sys.id, fnType: 'SYS' });
         const lossBraking = p.addEvent({ name: 'Loss of braking torque', kind: 'basic', groupId: brakeFn.id });
 
         // ── Failure network (causation) — same topology as the calibration
