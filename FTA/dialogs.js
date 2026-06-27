@@ -218,9 +218,11 @@ const dialogs = (() => {
 
         let body;
         if (isFmeda) {
-            // In multi-create the body is the leaf spec to replicate, so render
-            // it editable regardless of the pre-selected function's level.
-            const flexE = multiCreate ? Object.assign({}, e, { groupId: null }) : e;
+            // The body follows the chosen function's level: a neutral prompt
+            // until one is picked, editable inputs for a LOW/MITIGATION function,
+            // the derived note for a TOP/MID one. (A new mode opens with nothing
+            // pre-selected — see the function picker — so it starts neutral.)
+            const flexE = e;
             body = `
                 ${_errBox()}
                 ${nameField}
@@ -247,31 +249,32 @@ const dialogs = (() => {
 
         if (isFmeda) {
             if (multiCreate) {
-                // Multi-select. The body is the leaf spec to replicate. Show the
-                // editable FIT/DC/mitigation inputs only when at least one chosen
-                // function is a LEAF (low-level or mitigation). When every chosen
-                // function is derived (mid/top), hide the inputs — a derived
-                // effect takes its rate and DC from the lower-level modes through
-                // the failure net, so there is nothing to enter. Rebuild the body
-                // only when that state flips, so values typed while a leaf stays
-                // selected are never discarded.
-                let _editable = true;            // default: editable (the leaf case)
+                // Multi-select. The editable FIT/DC/mitigation inputs appear ONLY
+                // when at least one chosen function is a LEAF (low-level or
+                // mitigation); when every chosen function is derived (top/mid) the
+                // inputs are hidden (a derived effect takes its rate and DC from
+                // the modes below); and with nothing chosen the body is a neutral
+                // prompt. The body is rebuilt only when that STATE changes, so
+                // values typed while a leaf stays selected are never discarded.
+                // SAVE replicates the spec into every chosen function regardless
+                // of which one the preview is anchored to, so re-anchoring the
+                // preview here cannot affect the result.
+                let _specState = _fmedaSpecState(p, e.groupId);
                 picklist.wire('fGroup', () => {
-                    const ids = picklist.values('fGroup');
-                    const anyLeaf = ids.length === 0
-                        ? true                   // nothing chosen yet → keep the leaf form
-                        : ids.some(id => !_fmedaDerivedLevel(p, id));
-                    if (anyLeaf === _editable) return;   // no change → preserve typed values
-                    _editable = anyLeaf;
+                    const ids     = picklist.values('fGroup');
+                    const leafIds = ids.filter(id => _fmedaSpecState(p, id) === 'leaf');
+                    const st = !ids.length ? 'none' : (leafIds.length ? 'leaf' : 'derived');
+                    if (st === _specState) return;     // no change → preserve typed values
+                    _specState = st;
                     const flex = document.getElementById('fmedaFlex');
                     if (!flex) return;
-                    const flexE = anyLeaf
-                        ? Object.assign({}, e, { groupId: null })   // editable leaf form
-                        : Object.assign({}, e, { groupId: ids[0] }); // derived read-only note
-                    flex.innerHTML = _fmedaFlexHtml(p, flexE, existing);
-                    if (anyLeaf) _wireProbSection(p, e);
+                    e.groupId = st === 'leaf' ? leafIds[0]
+                              : st === 'derived' ? ids[0]
+                              : null;                  // anchor the preview to the choice
+                    flex.innerHTML = _fmedaFlexHtml(p, e, existing);
+                    if (st === 'leaf') _wireProbSection(p, e);
                 });
-                _wireProbSection(p, e);
+                if (_specState === 'leaf') _wireProbSection(p, e);
             } else {
                 // Edit: the picker is multi too. The failure mode stays in the
                 // FIRST selected function (its home); any additional selections
@@ -283,9 +286,9 @@ const dialogs = (() => {
                     e.groupId = home;
                     const flex = document.getElementById('fmedaFlex');
                     if (flex) flex.innerHTML = _fmedaFlexHtml(p, e, existing);
-                    if (!_fmedaDerivedLevel(p, e.groupId)) _wireProbSection(p, e);
+                    if (_fmedaSpecState(p, e.groupId) === 'leaf') _wireProbSection(p, e);
                 });
-                if (!_fmedaDerivedLevel(p, e.groupId)) _wireProbSection(p, e);
+                if (_fmedaSpecState(p, e.groupId) === 'leaf') _wireProbSection(p, e);
             }
         } else {
             _wireProbSection(p, e);
@@ -297,7 +300,22 @@ const dialogs = (() => {
        derived effect, an explanatory note and a hidden mitigation carrier).
        Rebuilt whenever the owning function — and therefore the level — changes. */
     function _fmedaFlexHtml(p, e, existing) {
-        const isDerived = _fmedaDerivedLevel(p, e.groupId);
+        const state = _fmedaSpecState(p, e.groupId);
+        // No function chosen yet → a neutral prompt with NO rate/coverage inputs.
+        // The editor must not open pre-filled with detail fields (that belongs to
+        // a LOW/MITIGATION function only), nor show an empty note box. The hidden
+        // mitigation carrier keeps the save path stable.
+        if (state === 'none') {
+            return `
+                <div class="dlg-note dlg-note--flush">Choose the function this
+                    failure mode belongs to (above). A <strong>low-level</strong>
+                    or <strong>mitigation</strong> function takes an editable
+                    failure rate and diagnostic coverage; a
+                    <strong>top/mid</strong> function shows a derived effect
+                    computed from the lower-level modes.</div>
+                <input type="hidden" id="fMitigation" value="${fmt.escHtml(e.mitigation || '')}">`;
+        }
+        const isDerived = (state === 'derived') ? _fmedaDerivedLevel(p, e.groupId) : '';
         let detailField;
         if (isDerived) {
             detailField = `
@@ -367,7 +385,7 @@ const dialogs = (() => {
             <div class="dlg-readonly">
                 ${rows}
                 <div class="dlg-ro-row dlg-ro-row--divider">
-                    <span>Incoming total</span><strong>${fmt.fitStr(incomeFit)}</strong></div>
+                    <span>Incoming total λ<sub>DU</sub></span><strong>${fmt.fitStr(incomeFit)}</strong></div>
                 <div class="dlg-note">Your entered rate is
                     <strong>added on top</strong> of this.${gateNote} Total residual
                     for this failure = your rate + incoming
@@ -383,6 +401,26 @@ const dialogs = (() => {
         const el = p.elementOf(groupId);
         const lvl = el ? (el.level || '') : '';
         return (lvl === 'top' || lvl === 'mid') ? lvl : '';
+    }
+
+    /* Which error-specification body to render for a failure mode whose owning
+       function is `groupId`:
+         'none'    — no function chosen yet (or it resolves to no element). The
+                     editor shows a neutral prompt with NO rate/coverage inputs,
+                     so it never opens pre-filled with detail fields the user did
+                     not ask for, and never renders an empty note box.
+         'derived' — owned by a TOP/MID (systematic) element: read-only, its rate
+                     and coverage come from the modes below through the fail net.
+         'leaf'    — owned by a LOW element or a MITIGATION: editable FMD / DC /
+                     mitigation inputs.
+       This is the single classifier the FM editor uses to decide between a blank
+       prompt, the derived note, and the editable inputs. */
+    function _fmedaSpecState(p, groupId) {
+        if (!groupId) return 'none';
+        const el = p.elementOf(groupId);
+        if (!el || el.kind !== 'element') return 'none';
+        const lvl = el.level || '';
+        return (lvl === 'top' || lvl === 'mid') ? 'derived' : 'leaf';
     }
 
     /* Read-only computed summary for a derived failure mode. */
@@ -623,7 +661,8 @@ const dialogs = (() => {
         const isMit = project && el ? project.isMitigationElement(el) : false;
         const elLam = project && el ? project.elementLambdaFit(el) : 0;
         const elName = el ? el.name : 'its element';
-        const lamNote = !el ? ''
+        const lamNote = !el
+            ? 'Choose the function this failure mode belongs to (above); it inherits that element\u2019s λ and takes its FMD share.'
             : (elLam > 0
                 ? `Inherits λ = <strong>${fmt.fitStr(elLam)}</strong> from <em>${fmt.escHtml(elName)}</em>; this mode takes its FMD share below.`
                 : `<em>${fmt.escHtml(elName)}</em> has no base failure rate λ yet — set it on the element, or this mode computes 0 FIT.`);
@@ -880,7 +919,14 @@ const dialogs = (() => {
             const lfm      = mpfBase > 0 ? 1 - lamMPFl / mpfBase : null;
             const pc = x => (x == null ? '—' : Math.round(x * 100) + '%');
             const isoLens = (project.standard !== 'IEC61508');
-            const band = isoLens ? fmt.asilFromMetrics(pfh, spfm, lfm) : fmt.silForPfh(pfh);
+            const rawBand = isoLens ? fmt.asilFromMetrics(pfh, spfm, lfm) : fmt.silForPfh(pfh);
+            // A failure mode can never out-rank the element that realises its
+            // function (ARCHITECTURE.md): cap the read-out to the element band —
+            // the SAME ceiling the results panel and fmedaModeBand apply — so the
+            // drawer can't show a SIL-4 mode sitting on a SIL-1 element.
+            const elOfMode = project.elementOfMode(e.id);
+            const band = elOfMode ? project.fmedaCapBandToElement(rawBand, elOfMode.id, isoLens) : rawBand;
+            const capped = (band !== rawBand);
             const star = (band === 'ASIL A') ? '*' : '';
             live.innerHTML =
                 'λ<sub>mode</sub> = ' + fmt.fitStr(lamMode) +
@@ -890,7 +936,10 @@ const dialogs = (() => {
                 ' · residual λ<sub>DU</sub> = <strong>' + fmt.fitStr(lamDU) + '</strong>' +
                 ' · PFH = ' + fmt.perHourStr(pfh) +
                 '<br>DC₁ → SPFM = <strong>' + pc(spfm) + '</strong> · DC₂ → LFM = <strong>' + pc(lfm) + '</strong>' +
-                '<br>residual reaches <strong>' + band + star + '</strong> (rolled up to its function / element)';
+                '<br>residual reaches <strong>' + band + star + '</strong>' +
+                (capped
+                    ? ' — the rate alone would be ' + rawBand + ', capped to the element\u2019s band'
+                    : ' (rolled up to its function / element)');
             return;
         }
         // FTA/ETA: PFD / PFH from the chosen mode.
@@ -1536,7 +1585,7 @@ const dialogs = (() => {
                 <input type="radio" name="fColor" value="${c}" ${c === g.color ? 'checked' : ''}>
             </label>`).join('');
 
-        // FMEDA-specific fields. For an element: which swimlane level.
+        // FMEDA-specific fields. For an element: which abstraction layer.
         // For a function: which parent element it lives in. Hidden for
         // plain FTA/ETA groups (kind 'group').
         const isFmeda = p.mode === 'FMEDA' &&
@@ -1561,13 +1610,16 @@ const dialogs = (() => {
                 `<label class="dlg-chip ${g.level === v ? 'dlg-chip-on' : ''}">
                     <input type="radio" name="fLevel" value="${v}" ${g.level === v ? 'checked' : ''}>
                     <span>${l}</span></label>`).join('');
-            fmedaFields += `<div class="dlg-label">Swimlane level</div>
+            fmedaFields += `<div class="dlg-label">Abstraction layer</div>
                 <div class="dlg-chips" id="fLevelChips">${opts}</div>`;
         } else if (isFmeda && g.kind === 'function') {
             // Function realisation type (v7) — HW / SW / SYS. Software is a
             // function (never a standalone element); the type is a classification
             // and does not scale the rate.
-            const curFn = ['HW','SW','SYS'].includes(g.fnType) ? g.fnType : 'HW';
+            // An EXISTING function keeps its stored type; a NEW one starts with
+            // NOTHING selected, so the user must choose HW / SW / SYS (no silent
+            // HW default that quietly mislabels the function).
+            const curFn = (existing && ['HW','SW','SYS'].includes(g.fnType)) ? g.fnType : '';
             const fnOpts = CONFIG.fnTypes.map(t =>
                 `<label class="dlg-chip ${curFn === t.value ? 'dlg-chip-on' : ''}">
                     <input type="radio" name="fFnType" value="${t.value}" ${curFn === t.value ? 'checked' : ''}>
@@ -1576,7 +1628,7 @@ const dialogs = (() => {
                 <div class="dlg-chips" id="fFnTypeChips">${fnOpts}</div>`;
             fmedaFields += _field(existing ? 'Parent element(s)' : 'Parent element',
                 picklist.create({ id: 'fParent', items: _elementPickItems(p),
-                            selected: g.parentId ? [g.parentId] : [], multi: true,
+                            selected: (existing && g.parentId) ? [g.parentId] : [], multi: true,
                             placeholder: 'Search elements…' }),
                 existing
                     ? 'The element this function belongs to. The function stays in the first element selected; selecting additional elements places an independent copy — with its failure modes — in each.'
@@ -1725,7 +1777,7 @@ const dialogs = (() => {
             });
         });
         // The hardware-details drawer applies to a LOW-LEVEL (hardware) element
-        // only. Show/hide it live as the swimlane level changes.
+        // only. Show/hide it live as the abstraction layer changes.
         const _toggleHwDrawer = () => {
             const wrap = document.getElementById('fHwDrawerWrap');
             if (!wrap) return;
@@ -1783,6 +1835,20 @@ const dialogs = (() => {
         const desc = document.getElementById('fDesc').value;
         const col  = (document.querySelector('input[name="fColor"]:checked') || {}).value;
         if (!name) { _err('Name is required.'); return; }
+        // FMEDA: an element must sit on an abstraction layer, and a function must
+        // declare its type — neither gets a silent default, so the group is only
+        // created once the user has actually chosen (the chips start empty for a
+        // new group). The chip containers are present only for the relevant kind
+        // (a Mitigation element shows a note instead, and is locked to low), so
+        // their presence is the right gate.
+        if (document.getElementById('fLevelChips') &&
+            !document.querySelector('input[name="fLevel"]:checked')) {
+            _err('Choose an abstraction layer (top, mid, or low) for this element.'); return;
+        }
+        if (document.getElementById('fFnTypeChips') &&
+            !document.querySelector('input[name="fFnType"]:checked')) {
+            _err('Choose the function type (HW, SW, or SYS).'); return;
+        }
         const patch = { name, description: desc };
         // Color is only set when the swatch picker is present (FTA/ETA).
         // FMEDA uses semantic colors, so leave the stored color untouched.
@@ -2262,7 +2328,7 @@ const dialogs = (() => {
             lines.push('- [' + e.id + '] ' + e.name +
                 (e.level ? ' (' + e.level + ')' : '') +
                 ' — ' + band +
-                '; total residual ' + fmt.fitStr(e.residualFit));
+                '; total residual λ_DU ' + fmt.fitStr(e.residualFit));
         });
         lines.push('');
 
@@ -2270,9 +2336,9 @@ const dialogs = (() => {
         lines.push('## Functions (' + ru.functions.length + ')');
         ru.functions.forEach(f => {
             lines.push('- [' + f.id + '] ' + f.name + '  (' + f.elementName + ')');
-            lines.push('   - Residual: ' + fmt.fitStr(f.residualFit) + ' = ' + pfhStr(f.residualFit) +
+            lines.push('   - Residual λ_DU: ' + fmt.fitStr(f.residualFit) + ' = ' + pfhStr(f.residualFit) +
                 '  →  ' + fnBandOf(f));
-            lines.push('   - Raw: ' + fmt.fitStr(f.rawFit) +
+            lines.push('   - Raw λ_D: ' + fmt.fitStr(f.rawFit) +
                 ' · handled ' + f.handledCount + '/' + f.total +
                 (f.derivedCount ? ' · derived ' + f.derivedCount : ''));
         });
@@ -2291,7 +2357,7 @@ const dialogs = (() => {
             const sr  = p.fmedaSrIdOf(e.id);
             lines.push('- [' + e.id + '] ' + e.name + '  (' + fn.name + ')' +
                 (derived ? ' — DERIVED' : '') + (sr ? ' — ' + sr : ''));
-            lines.push('   - raw ' + fmt.fitStr(raw) + ' · residual ' + fmt.fitStr(res) +
+            lines.push('   - raw λ_D ' + fmt.fitStr(raw) + ' · residual λ_DU ' + fmt.fitStr(res) +
                 ' · DC ' + Math.round(dc * 100) + '%');
         });
         lines.push('');

@@ -13,7 +13,7 @@ const CONFIG = {
        and stamped into exported reports / saved projects. BUMP THIS ON
        EVERY ITERATION of development — patch for fixes, minor for new
        features, major for breaking changes. */
-    appVersion:  '3.8.3',
+    appVersion:  '3.8.5',
     releaseDate: '2026-06-26',
 
     /* JSON file-format version. v2 added direct links; v3 was an earlier
@@ -187,7 +187,7 @@ const CONFIG = {
                          receives its figures bottom-up through the failure net.
          · 'subsystem' — a systematic mid-level element. Same: no own rate, fed
                          from below.
-       The coupling to the swimlane level is fixed: LOW ⇒ hardware (forced);
+       The coupling to the abstraction layer is fixed: LOW ⇒ hardware (forced);
        MID ⇒ subsystem (default) or system; TOP ⇒ system (default) or subsystem.
        Software is never an element — it is allocated onto hardware and modelled
        as a FUNCTION (fnType 'SW'); see archTypeForLevel / fnTypes below. */
@@ -319,7 +319,7 @@ const CONFIG = {
             body:
                 '<p>FAS builds a safety analysis from a <strong>layered model</strong> and reports the achieved <strong>SIL</strong> (IEC 61508) or <strong>ASIL</strong> (ISO 26262) for each part and for the system. Pick the analysis with the mode toggle: <strong>FTA</strong> (fault tree), <strong>ETA</strong> (event tree) or <strong>FMEDA</strong>. The four layers below are the FMEDA model — read them bottom-up, because that is how the rate flows.</p>' +
                 '<h4>1 · Architecture elements — the hardware layer</h4>' +
-                '<p>Elements are the building blocks, placed in three swimlanes:</p>' +
+                '<p>Elements are the building blocks, placed in three abstraction layers:</p>' +
                 '<ul>' +
                 '<li><strong>Low level = hardware.</strong> A physical part. It carries the reliability data: a single base failure rate <strong>λ (FIT)</strong> from a datasheet, reliability prediction or standard. This is the <em>only</em> place a rate is entered.</li>' +
                 '<li><strong>Mid level = subsystem</strong> and <strong>top level = system.</strong> These are <em>systematic</em> elements. They carry no rate of their own — they <strong>receive</strong> their figures bottom-up through the failure net from the hardware below them.</li>' +
@@ -569,7 +569,7 @@ const CONFIG = {
         fmedaArch: {
             title: 'FMEDA — architecture elements & levels',
             body:
-                '<p><strong>Architecture elements</strong> are the building blocks of the FMEDA. Each sits in one of three swimlanes by level: <strong>top</strong> (the system), <strong>mid</strong> (boards, controllers), and <strong>low</strong> (supporting sub-elements).</p>' +
+                '<p><strong>Architecture elements</strong> are the building blocks of the FMEDA. Each sits in one of three abstraction layers: <strong>top</strong> (the system), <strong>mid</strong> (boards, controllers), and <strong>low</strong> (supporting sub-elements).</p>' +
                 '<p>An element contains <em>functions</em>, and each function contains its <em>failure modes</em> — the box-in-box containment of the FMEDA. Top and mid failure modes are <em>derived</em>: their rate is composed bottom-up from the lower-level failure modes that feed them through the failure net.</p>' +
                 '<p>Composition is <strong>additive</strong> and edge-driven: a failure mode\'s residual is its own entered rate <em>plus</em> whatever the failure net feeds in. This holds at any level — link one low-level failure into another (LL → LL) and the second one composes too.</p>' +
                 '<p>A <strong>Mitigation (M)</strong> is a low-level element that mitigates a common cause. It carries its own functions and failure modes like any element. Link one of its failure modes into a common cause (M → cause) to mark that finding addressed — the mitigation adds its own failure to the chain, it never subtracts a rate.</p>'

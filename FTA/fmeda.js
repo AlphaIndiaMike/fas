@@ -36,7 +36,7 @@
             // defaults (parentId null, kind 'group') and ignore them.
             //   kind:  'element' | 'function' | 'group'
             //   parentId: a function's parent element (null otherwise)
-            //   level: 'top' | 'mid' | 'low' swimlane (elements only)
+            //   level: 'top' | 'mid' | 'low' abstraction layer (elements only)
             //   mitigation: true ⇒ this element is a Mitigation (M_n). It is
             //        an ordinary low element in every computation; the flag
             //        only drives its id prefix, styling and common-cause role.
@@ -295,7 +295,7 @@
         return raw * (1 - dc);
     },
 
-    /* The swimlane level ('top' | 'mid' | 'low' | null) of the element that
+    /* The abstraction layer ('top' | 'mid' | 'low' | null) of the element that
        ultimately owns a failure mode. A failure mode lives in a function,
        which lives in an element; the element carries the level. */
     fmedaLevelOf(eventId) {
@@ -761,8 +761,16 @@
         // function is no more integrous than the hardware element that
         // implements it (kills "SIL-4 function on a SIL-2 element"). A function
         // with no rate is not characterised → '—' (no claim on the canvas).
-        const elBandById = {};
-        elements.forEach(e => { elBandById[e.id] = { asil: e.achievedAsil, sil: e.achievedSil }; });
+        //
+        // The ceiling is the CANONICAL element band (fmedaElementBandState, the
+        // single source the canvas/panel/report read), NOT the metrics element
+        // rows below — those only ever contain the LOW (hardware) elements that
+        // own a leaf mode, so a function realised by a systematic MID/TOP element
+        // (whose band is computed from its subtree, not a leaf row) would escape
+        // the cap entirely. Computing both lenses once here keeps the panel and
+        // the editor read-out (fmedaModeBand) in lock-step on the same ceiling.
+        const elAsilCeil = this.fmedaElementBands(true);    // { id: 'ASIL x' | 'QM' | … }
+        const elSilCeil  = this.fmedaElementBands(false);   // { id: 'SIL n' | 'not allowed' | … }
         const _asilOrder = ['—', 'QM', 'ASIL A', 'ASIL B', 'ASIL C', 'ASIL D'];
         const _arank = b => _asilOrder.indexOf(b);
         const capAsil = (b, ceil) => {
@@ -790,7 +798,10 @@
                 a.achievedSil = fmt.achievedBand(a, false);
             }
             // Cap both scales to the owning element's achieved band.
-            const ec = a.elementId != null ? elBandById[a.elementId] : null;
+            const ec = a.elementId != null
+                ? { asil: elAsilCeil[a.elementId] != null ? elAsilCeil[a.elementId] : null,
+                    sil:  elSilCeil[a.elementId]  != null ? elSilCeil[a.elementId]  : null }
+                : null;
             if (ec) {
                 a.achievedAsilUncapped = a.achievedAsil;
                 a.achievedSilUncapped  = a.achievedSil;
@@ -1179,9 +1190,42 @@
     fmedaModeBand(modeId, iso) {
         const e = this.eventById(modeId);
         if (!e) return iso ? '—' : 'No SIL';
-        if (!iso) return fmt.silForPfh(this.fmedaPropagatedResidual(modeId) * 1e-9);
-        const agg = this._fmedaAggregateLeaves(this._fmedaModeLeaves(modeId), null);
-        return fmt.achievedBand(agg, true);
+        // Raw, mode-local band (rate-driven SIL / metric-gated ASIL of the
+        // mode's own subtree).
+        const raw = !iso
+            ? fmt.silForPfh(this.fmedaPropagatedResidual(modeId) * 1e-9)
+            : fmt.achievedBand(this._fmedaAggregateLeaves(this._fmedaModeLeaves(modeId), null), true);
+        // Cap to the band of the element that REALISES the mode's function — a
+        // failure mode is no more integrous than the hardware element that
+        // implements it (ARCHITECTURE.md). This is the SAME ceiling the results
+        // panel applies to function rows (fmedaElementBandState), so the editor
+        // read-out can never disagree with the panel: kills "SIL-4 mode on a
+        // SIL-1 element". Called one-at-a-time from the editor, so the single
+        // band-state pass here is not on a hot path.
+        const el = this.elementOfMode(modeId);
+        return el ? this.fmedaCapBandToElement(raw, el.id, iso) : raw;
+    },
+
+    /* The achieved-band CEILING an element imposes on the functions and failure
+       modes it realises, in the active lens — the SAME band the canvas, the
+       results panel and the report show for the element (fmedaElementBandState,
+       declared-capability ceiling already applied). Returns a band string, or
+       null when the element is not yet characterised (no band → nothing to cap
+       against). Works for EVERY element, including the systematic mid/top ones
+       that never appear as metrics element rows. */
+    fmedaElementCeiling(elementId, iso) {
+        if (elementId == null) return null;
+        const st = this.fmedaElementBandState(iso)[elementId];
+        return (st && st.computed) ? st.band : null;
+    },
+
+    /* Cap a SIL/ASIL band by an element's ceiling in the given lens. An unknown
+       band ('—') or an uncharacterised element (null ceiling) passes through. */
+    fmedaCapBandToElement(band, elementId, iso) {
+        if (band == null || band === '—') return band;
+        const ceil = this.fmedaElementCeiling(elementId, iso);
+        if (ceil == null || ceil === '—') return band;
+        return iso ? fmt.asilMin(band, ceil) : fmt.silMin(band, ceil);
     },
 
     /* The LEAF failure-mode ids whose failures reach any mode of `functionId`

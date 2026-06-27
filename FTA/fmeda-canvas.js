@@ -232,8 +232,8 @@ const fmedaCanvas = (() => {
                     : ((fr && fr.residualFit > 0) ? bandFor(fr.residualFit * 1e-9) : '');
                 const fnBand = (fnBandRaw && fnBandRaw !== '—') ? fnBandRaw : '';
                 const fnMetric = fr
-                    ? (fnBand ? fmt.fitStr(fr.residualFit) + ' · ' + fnBand
-                              : fmt.fitStr(fr.residualFit))
+                    ? (fnBand ? 'λ_DU ' + fmt.fitStr(fr.residualFit) + ' · ' + fnBand
+                              : 'λ_DU ' + fmt.fitStr(fr.residualFit))
                     : '';
                 els.push({
                     group: 'nodes',
@@ -303,12 +303,13 @@ const fmedaCanvas = (() => {
                 const severity = !handled && resFit > 0
                     ? (band === 'QM' ? 'bad' : 'warn')
                     : 'ok';
-                // Metric line: the mode's residual FIT, and nothing more. A
-                // failure mode is classified and counted (FIT, DC), but it is
-                // NOT assigned a SIL/ASIL/QM integrity level — that belongs to
-                // the function and the element. So the band is shown there, not
-                // here. Rebuilt every render, so it tracks edits / Recalculate.
-                const metricLine = fmt.fitStr(resFit);
+                // Metric line: the mode's residual dangerous-undetected rate,
+                // explicitly labelled λ_DU so it is never confused with an
+                // element's total λ. A failure mode is classified and counted
+                // (λ_DU, DC) but is NOT assigned a SIL/ASIL/QM integrity level —
+                // that belongs to the function and the element, shown there.
+                // Rebuilt every render, so it tracks edits / Recalculate.
+                const metricLine = 'λ_DU ' + fmt.fitStr(resFit);
                 // Saved position wins (like FTA); unplaced ones stack under
                 // the placed siblings computed above.
                 const placed = (e.x || e.y);

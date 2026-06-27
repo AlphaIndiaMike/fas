@@ -558,7 +558,7 @@ const main = (() => {
                 break;
             // ── FMEDA ──
             case 'fmeda-element':
-                _fmedaAddElement('low');
+                _fmedaAddElement();
                 break;
             case 'fmeda-mitigation':
                 _fmedaAddMitigation();
@@ -597,8 +597,11 @@ const main = (() => {
     function _fmedaAddElement(level) {
         // Open the editor in CREATE mode with a draft — the element is only
         // committed when the user clicks Save (Cancel leaves nothing behind).
+        // No abstraction layer is pre-selected (level defaults to null): the
+        // user must choose top / mid / low deliberately, rather than silently
+        // landing on a default that mislabels the element.
         dialogs.openGroupEdit(null, {
-            kind: 'element', level: level,
+            kind: 'element', level: level || null,
             name: 'Element ' + (project.elementGroups().length + 1)
         });
     }

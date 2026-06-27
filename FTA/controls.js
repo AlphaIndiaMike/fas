@@ -80,12 +80,12 @@ const controls = (() => {
                     <div class="ctrl-empty">Build the failure net — one failure
                         reaching two functions is flagged here.</div>
                 </div>
-                <div class="ctrl-section-hd ctrl-section-hd--gap">Residual failure rate
+                <div class="ctrl-section-hd ctrl-section-hd--gap">Failure rates &amp; integrity
                     <button type="button" class="dlg-help" data-help="fmedaResidual" title="What is this?">?</button>
                 </div>
                 <div id="ctrlResidual" class="ctrl-residual">
-                    <div class="ctrl-empty">Press Recalculate to compute residual
-                        λ (FIT) per function after diagnostic credit.</div>
+                    <div class="ctrl-empty">Press Recalculate to compute the whole-item
+                        λ split and each element / function's residual rate and band.</div>
                 </div>
             </div>
 
@@ -726,7 +726,7 @@ const controls = (() => {
                 </div>`;
         }
 
-        let h = verdict + `<div class="res-section">λ breakdown</div>
+        let h = verdict + `<div class="res-section">λ breakdown — whole item (every element)</div>
             <div class="res-card res-metrics-card">
                 ${row('λ<sub>Total</sub>', fit(t.lambdaTotal))}
                 ${row('λ<sub>SD</sub> · λ<sub>SU</sub>', fit(t.lambdaSD) + ' · ' + fit(t.lambdaSU))}
@@ -734,7 +734,7 @@ const controls = (() => {
                 ${row('λ<sub>DU</sub> — undetected dangerous', fit(t.lambdaDU))}
                 ${iso ? row('λ<sub>SPF</sub> · λ<sub>RF</sub>', fit(t.lambdaSPF) + ' · ' + fit(t.lambdaRF)) +
                         row('λ<sub>MPF,latent</sub>', fit(t.lambdaMPFlatent)) : ''}
-                <div class="res-m-note">Computed over leaf failure modes. λ<sub>S</sub> derives from the dangerous fraction (λ<sub>SD</sub> = 0; all λ<sub>S</sub> sits in λ<sub>SU</sub>). SFF = (Σλ<sub>S</sub> + Σλ<sub>DD</sub>) / Σλ<sub>Total</sub>.</div>
+                <div class="res-m-note">Summed over <strong>every leaf failure mode of every element</strong> — the whole item's hardware, the basis for SFF / SPFM / LFM. This is NOT a single function's rate: an individual function or top-level effect shows a much smaller residual below (a redundant AND path is far smaller still — its joint rate). Redundancy is credited as <strong>hardware fault tolerance (HFT) in Route 1<sub>H</sub></strong>, raising the achievable SIL — it does not shrink this λ sum. Systematic top/mid elements carry no λ of their own, so they add nothing here; their rate is computed from the leaves below. λ<sub>S</sub> derives from the dangerous fraction (λ<sub>SD</sub> = 0; all λ<sub>S</sub> sits in λ<sub>SU</sub>). SFF = (Σλ<sub>S</sub> + Σλ<sub>DD</sub>) / Σλ<sub>Total</sub>.</div>
             </div>`;
         if (metrics.elements && metrics.elements.length) {
             h += `<div class="res-section">Per-element metrics</div>`;
@@ -770,7 +770,7 @@ const controls = (() => {
                         <div class="res-fn">${fmt.escHtml(e.name)}
                             <span class="res-id">${fmt.escHtml(e.id || '')}</span>
                             ${e.level ? `<span class="res-lvl">${fmt.escHtml(e.level)}</span>` : ''}</div>
-                        <div class="res-pfh">λ ${fit(e.lambdaTotal)} FIT · MTBF ${mtbf} · ${tail}${elBand && elBand !== '—' ? ' → <strong>' + fmt.escHtml(elBand) + '</strong>' : ''}</div>
+                        <div class="res-pfh">λ<sub>total</sub> ${fit(e.lambdaTotal)} · MTBF ${mtbf} · ${tail}${elBand && elBand !== '—' ? ' → <strong>' + fmt.escHtml(elBand) + '</strong>' : ''}</div>
                         ${note}
                     </div>`;
                 });
@@ -999,7 +999,7 @@ const controls = (() => {
                             <span class="res-id">${fmt.escHtml(elr.id)}</span>
                             ${elr.level ? `<span class="res-lvl">${fmt.escHtml(elr.level)}</span>` : ''}${_archLbl(elr.archType)}</div>
                         <div class="res-levels">${levels}</div>
-                        <div class="res-pfh">total residual ${fitStr(elr.residualFit)}</div>
+                        <div class="res-pfh">total residual λ<sub>DU</sub> ${fitStr(elr.residualFit)}</div>
                         ${capNote(elr)}
                         ${claimNote(elr)}
                         ${_lensNote}
@@ -1040,7 +1040,7 @@ const controls = (() => {
                     : `<span class="res-raw">No diagnostic credit (raw = residual)</span>`;
                 body = `
                     <div class="res-levels">${levelsHtml}</div>
-                    <div class="res-nums">residual <strong>${fitStr(f.residualFit)}</strong>
+                    <div class="res-nums">residual λ<sub>DU</sub> <strong>${fitStr(f.residualFit)}</strong>
                         &nbsp;·&nbsp; ${fmt.pfhDualStr(pfh)}</div>
                     <div class="res-pfh">${reductionLine}</div>
                     ${remarkHtml}`;
