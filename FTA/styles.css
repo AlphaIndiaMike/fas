@@ -5,6 +5,20 @@
    accent is dark mustard (#9a7c00) on warm cream chrome.
 ═══════════════════════════════════════════════════════════════════ */
 
+/* ── Fonts (self-hosted, offline) ───────────────────────────────────
+   Outfit + JetBrains Mono are vendored under lib/fonts/ (SIL Open Font
+   License; see the *-OFL.txt files there). No network request is made —
+   the tool runs fully offline. Paths are relative to this file (root).
+   'swap' shows the fallback (sans-serif / monospace) until the woff2
+   loads, so nothing blocks on the font. */
+@font-face { font-family: 'Outfit'; font-style: normal; font-weight: 300; font-display: swap; src: url('lib/fonts/outfit-latin-300-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Outfit'; font-style: normal; font-weight: 400; font-display: swap; src: url('lib/fonts/outfit-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Outfit'; font-style: normal; font-weight: 500; font-display: swap; src: url('lib/fonts/outfit-latin-500-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Outfit'; font-style: normal; font-weight: 600; font-display: swap; src: url('lib/fonts/outfit-latin-600-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Outfit'; font-style: normal; font-weight: 700; font-display: swap; src: url('lib/fonts/outfit-latin-700-normal.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400; font-display: swap; src: url('lib/fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 500; font-display: swap; src: url('lib/fonts/jetbrains-mono-latin-500-normal.woff2') format('woff2'); }
+
 /* ── CSS Variables ──────────────────────────────────────────────── */
 :root {
     --bg-base:      #f4f0e0;
